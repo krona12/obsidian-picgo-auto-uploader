@@ -44,6 +44,47 @@ describe("diagnostic redaction", () => {
     ).toBe(false);
   });
 
+  it("removes complete Digest headers including quoted and comma-separated parameters", () => {
+    const username = ["digest", "private", "name"].join("-");
+    const response = ["digest", "private", "response"].join("-");
+    const output = redactText(
+      `Authorization: Digest username="${username}", response="${response}"\nvault=attachments/photo.png`,
+    );
+    expect([username, response].some((value) => output.includes(value))).toBe(
+      false,
+    );
+    expect(output).toContain("attachments/photo.png");
+  });
+
+  it("redacts quoted JSON authorization values with escaped Digest parameters", () => {
+    const credential = ["digest", "quoted", "credential"].join("-");
+    const output = redactText(
+      JSON.stringify({
+        authorization: `Digest username="${credential}", response="${credential}"`,
+        vaultPath: "attachments/photo.png",
+      }),
+    );
+    expect(output.includes(credential)).toBe(false);
+    expect(output).toContain("attachments/photo.png");
+  });
+
+  it.each(["Bearer", "Basic", "bEaReR"])(
+    "redacts the bare %s credential across exported keys and values",
+    (scheme) => {
+      const credential = ["detached", "authorization", "credential"].join("-");
+      const output = JSON.stringify(
+        createDiagnosticExport({
+          nested: { authorization: `${scheme} ${credential}` },
+          message: credential,
+          [credential]: { detail: credential },
+          vaultPath: "attachments/photo.png",
+        }),
+      );
+      expect(output.includes(credential)).toBe(false);
+      expect(output).toContain("attachments/photo.png");
+    },
+  );
+
   it("can redact a secret containing an unpaired Unicode surrogate", () => {
     const malformed = String.fromCharCode(0xd800);
     expect(redactText(`before ${malformed} after`, [malformed], [])).toBe(

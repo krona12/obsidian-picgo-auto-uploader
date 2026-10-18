@@ -26,9 +26,15 @@ export function redactText(
     .flatMap(variants)
     .sort((left, right) => right.length - left.length);
   for (const value of sensitive) output = output.split(value).join(REDACTED);
-  // Cover quoted JSON headers, log-style headers, and authorization assignments.
+  // Match a complete quoted value, including escaped Digest parameter quotes.
   output = output.replace(
-    /(\bauthorization\b["']?\s*[:=]\s*["']?)[^\r\n"',;}]+/gi,
+    /((["'])authorization\2\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')/gi,
+    `$1"${REDACTED}"`,
+  );
+  // Raw headers and assignments occupy the remainder of their log line. Commas
+  // and quotes belong to valid authorization schemes and cannot delimit them.
+  output = output.replace(
+    /(\bauthorization\b\s*[:=]\s*)[^\r\n]*/gi,
     `$1${REDACTED}`,
   );
   output = output.replace(
@@ -72,6 +78,10 @@ export function createDiagnosticExport(snapshot: object): {
     for (const [key, item] of Object.entries(value)) {
       if (sensitiveField.test(key) && typeof item === "string" && item)
         secrets.push(item);
+      if (/^authorization$/i.test(key) && typeof item === "string") {
+        const credentials = /^\s*(?:Bearer|Basic)\s+(.+?)\s*$/i.exec(item)?.[1];
+        if (credentials) secrets.push(credentials);
+      }
       if (key === "absolutePaths" && Array.isArray(item))
         for (const path of item)
           if (typeof path === "string") absolutePaths.push(path);
