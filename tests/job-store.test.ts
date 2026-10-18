@@ -222,6 +222,32 @@ describe("durable job store", () => {
     ).rejects.toThrow();
   });
 
+  // Break: a rejected async observer escapes notification delivery as an unhandled rejection.
+  it("consumes async subscriber rejections without failing durable mutations", async () => {
+    const persistence = memory();
+    const store = new JobStore(persistence);
+    const observed: JobState[] = [];
+    store.subscribe(async () => {
+      await Promise.resolve();
+      throw new Error("async view failed");
+    });
+    store.subscribe((snapshot) => {
+      observed.push(snapshot.jobs[0]!.state);
+    });
+
+    await expect(store.upsert(job())).resolves.toMatchObject({
+      state: "queued",
+    });
+    await expect(
+      store.transition("attachments/a.png", "waiting-stable"),
+    ).resolves.toMatchObject({ state: "waiting-stable" });
+    // Cross the rejection-reporting turn: Vitest fails this test run if any observer rejection escapes.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(persistence.saved!.jobs[0]!.state).toBe("waiting-stable");
+    expect(store.snapshot().jobs[0]!.state).toBe("waiting-stable");
+    expect(observed).toEqual(["queued", "waiting-stable"]);
+  });
+
   it("rejects malformed persisted records and invalid Vault identities", async () => {
     const store = new JobStore(memory());
     await expect(store.upsert(job("../escape.png"))).rejects.toThrow();

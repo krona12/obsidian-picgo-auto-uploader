@@ -334,7 +334,8 @@ export class JobStore {
   private notify(): void {
     for (const subscriber of this.subscribers) {
       try {
-        subscriber(this.snapshot());
+        // A void callback may still be async; observe its result without awaiting a view.
+        void Promise.resolve(subscriber(this.snapshot())).catch(() => {});
       } catch {
         /* A view cannot invalidate a durable commit. */
       }
