@@ -1,0 +1,11 @@
+.worktrees/
+.superpowers/
+node_modules/
+coverage/
+dist/
+release/
+main.js
+main.js.map
+data.json
+*.log
+
