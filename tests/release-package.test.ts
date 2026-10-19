@@ -384,8 +384,15 @@ describe("workflow policy", () => {
     expect(workflow).toMatch(/npm run check/);
     expect(workflow).toMatch(/retention-days:\s*[1-9]/);
     expect(workflow).toMatch(/gh release create.*--draft/);
-    expect(workflow).toMatch(/existing_release_ids=.*gh api[\s\S]*releases/);
-    expect(workflow).toMatch(/draft_release_ids=.*gh api[\s\S]*releases/);
+    expect(workflow).toMatch(
+      /release_records\(\) \{[\s\S]*gh api[\s\S]*releases/,
+    );
+    expect(workflow).toMatch(/existing_release_records=\$\(release_records\)/);
+    expect(workflow).toMatch(/jq -r --arg tag "\$RELEASE_TAG"/);
+    expect(workflow).toMatch(/existing_release_is_draft/);
+    expect(workflow).toMatch(/Reusing existing draft release/);
+    expect(workflow).toMatch(/expected_digests=.*sha256sum/s);
+    expect(workflow).toMatch(/actual_digests=.*\.digest/s);
     expect(workflow).toMatch(/releases\/\$DRAFT_RELEASE_ID/);
     expect(workflow).toMatch(
       /--method PATCH[\s\S]*-F draft=false[\s\S]*-f make_latest=true/,

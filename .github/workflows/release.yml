@@ -55,24 +55,47 @@ jobs:
           if-no-files-found: error
           retention-days: 3
           compression-level: 0
-      - name: Create draft with exact assets
+      - name: Create or reuse draft with exact assets
         id: create_release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          existing_release_ids=$(gh api --paginate "repos/${{ github.repository }}/releases" --jq ".[] | select(.tag_name == \"$RELEASE_TAG\") | .id")
-          if [ -n "$existing_release_ids" ]; then
-            echo "Release $RELEASE_TAG already exists; refusing to replace it." >&2
+          release_records() {
+            gh api --paginate "repos/${{ github.repository }}/releases" --slurp |
+              jq -r --arg tag "$RELEASE_TAG" '.[][] | select(.tag_name == $tag) | [.id, .draft] | @tsv'
+          }
+
+          existing_release_records=$(release_records)
+          existing_release_count=$(printf '%s\n' "$existing_release_records" | sed '/^$/d' | wc -l)
+          if [ "$existing_release_count" -gt 1 ]; then
+            echo "Found multiple releases for $RELEASE_TAG; refusing to choose one." >&2
             exit 1
           fi
-          gh release create "$RELEASE_TAG" --verify-tag --draft --latest=false --title "PicGo Auto Uploader $RELEASE_TAG" --notes-from-tag release/main.js release/manifest.json release/styles.css
-          draft_release_ids=$(gh api --paginate "repos/${{ github.repository }}/releases" --jq ".[] | select(.draft == true and .tag_name == \"$RELEASE_TAG\") | .id")
-          draft_release_count=$(printf '%s\n' "$draft_release_ids" | sed '/^$/d' | wc -l)
-          if [ "$draft_release_count" -ne 1 ]; then
-            echo "Expected exactly one draft release for $RELEASE_TAG; found $draft_release_count." >&2
-            exit 1
+
+          if [ "$existing_release_count" -eq 1 ]; then
+            draft_release_id=$(printf '%s\n' "$existing_release_records" | cut -f1)
+            existing_release_is_draft=$(printf '%s\n' "$existing_release_records" | cut -f2)
+            if [ "$existing_release_is_draft" != "true" ]; then
+              echo "Published release $RELEASE_TAG already exists; refusing to replace it." >&2
+              exit 1
+            fi
+            echo "Reusing existing draft release $draft_release_id for $RELEASE_TAG."
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --draft --latest=false --title "PicGo Auto Uploader $RELEASE_TAG" --notes-from-tag release/main.js release/manifest.json release/styles.css
+            created_release_records=$(release_records)
+            created_release_count=$(printf '%s\n' "$created_release_records" | sed '/^$/d' | wc -l)
+            if [ "$created_release_count" -ne 1 ]; then
+              echo "Expected exactly one release for $RELEASE_TAG after draft creation; found $created_release_count." >&2
+              exit 1
+            fi
+            draft_release_id=$(printf '%s\n' "$created_release_records" | cut -f1)
+            created_release_is_draft=$(printf '%s\n' "$created_release_records" | cut -f2)
+            if [ "$created_release_is_draft" != "true" ]; then
+              echo "Created release $draft_release_id is not a draft." >&2
+              exit 1
+            fi
           fi
-          draft_release_id=$(printf '%s\n' "$draft_release_ids" | sed -n '1p')
+
           case "$draft_release_id" in
             *[!0-9]*|"")
               echo "Draft release ID is invalid." >&2
@@ -92,9 +115,21 @@ jobs:
               ;;
           esac
           expected=$(printf '%s\n' main.js manifest.json styles.css)
-          actual=$(gh api "repos/${{ github.repository }}/releases/$DRAFT_RELEASE_ID" --jq '.assets | map(.name) | sort | .[]')
+          release_json=$(gh api "repos/${{ github.repository }}/releases/$DRAFT_RELEASE_ID")
+          actual=$(printf '%s' "$release_json" | jq -r '.assets | map(.name) | sort | .[]')
           if [ "$actual" != "$expected" ]; then
             printf 'Unexpected remote assets.\nExpected:\n%s\nActual:\n%s\n' "$expected" "$actual" >&2
+            exit 1
+          fi
+          expected_digests=$(
+            for asset in main.js manifest.json styles.css; do
+              digest=$(sha256sum "release/$asset" | cut -d ' ' -f1)
+              printf '%s\tsha256:%s\n' "$asset" "$digest"
+            done
+          )
+          actual_digests=$(printf '%s' "$release_json" | jq -r '.assets | sort_by(.name) | .[] | [.name, .digest] | @tsv')
+          if [ "$actual_digests" != "$expected_digests" ]; then
+            printf 'Remote asset digests do not match the audited package.\nExpected:\n%s\nActual:\n%s\n' "$expected_digests" "$actual_digests" >&2
             exit 1
           fi
           gh api --method PATCH "repos/${{ github.repository }}/releases/$DRAFT_RELEASE_ID" -F draft=false -f make_latest=true --silent
