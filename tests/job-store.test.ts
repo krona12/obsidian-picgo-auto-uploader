@@ -539,4 +539,58 @@ describe("durable job store", () => {
     ).rejects.toThrow("disk");
     expect(store.snapshot()).toEqual({ jobs: [original], logs: [] });
   });
+  it("clears only trashed completion history and retains every source safety tombstone", async () => {
+    const completed = job("attachments/completed.png", "trashed");
+    const failed = {
+      ...job("attachments/failed.png", "failed"),
+      failure: {
+        code: "write-failed",
+        stage: "rewrite" as const,
+        message: "Safe message.",
+        retry: "safe" as const,
+      },
+    };
+    const uncertain = {
+      ...job("attachments/uncertain.png", "uncertain"),
+      failure: {
+        code: "timeout",
+        stage: "upload" as const,
+        message: "Safe message.",
+        retry: "uncertain" as const,
+      },
+    };
+    const resumable = {
+      ...job("attachments/resumable.png", "rewriting"),
+      remoteUrl: "https://cdn.test/resumable.png",
+    };
+    const persistence = memory({
+      jobs: [completed, failed, uncertain, resumable],
+      logs: [
+        {
+          timestamp: 1,
+          level: "info",
+          stage: "trash",
+          code: "done",
+          message: "Done.",
+          vaultPath: completed.vaultPath,
+        },
+        {
+          timestamp: 2,
+          level: "error",
+          stage: "rewrite",
+          code: "write-failed",
+          message: "Safe message.",
+          vaultPath: failed.vaultPath,
+        },
+      ],
+    });
+    const store = new JobStore(persistence);
+    await store.hydrate();
+    await store.clearTerminalHistory();
+    expect(store.snapshot()).toEqual({
+      jobs: [failed, uncertain, resumable],
+      logs: [expect.objectContaining({ vaultPath: failed.vaultPath })],
+    });
+    expect(persistence.saved).toEqual(store.snapshot());
+  });
 });

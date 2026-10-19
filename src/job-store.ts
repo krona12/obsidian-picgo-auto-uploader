@@ -355,6 +355,21 @@ export class JobStore {
     });
   }
 
+  /** Clear only proven completions. Every record that may still map to a source remains. */
+  clearTerminalHistory(): Promise<void> {
+    return this.mutate((draft) => {
+      const completed = new Set(
+        draft.jobs
+          .filter((job) => job.state === "trashed")
+          .map((job) => job.vaultPath),
+      );
+      draft.jobs = draft.jobs.filter((job) => job.state !== "trashed");
+      draft.logs = draft.logs.filter(
+        (entry) => !entry.vaultPath || !completed.has(entry.vaultPath),
+      );
+    });
+  }
+
   private path(path: string): string {
     const normalized = normalizeVaultPath(path);
     if (!normalized) throw new Error("Invalid Vault path.");
