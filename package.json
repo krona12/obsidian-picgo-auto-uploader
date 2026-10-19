@@ -3,8 +3,21 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "main": "main.js",
   "description": "Safely upload Obsidian attachments through PicGo.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/krona12/obsidian-picgo-auto-uploader.git"
+  },
+  "bugs": {
+    "url": "https://github.com/krona12/obsidian-picgo-auto-uploader/issues"
+  },
+  "homepage": "https://github.com/krona12/obsidian-picgo-auto-uploader#readme",
   "scripts": {
+    "check": "npm run format:check && npm run lint && npm run typecheck && npm run test:coverage && npm run package",
+    "package": "npm run build && node scripts/check-release.mjs",
+    "version": "node scripts/version-bump.mjs",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",

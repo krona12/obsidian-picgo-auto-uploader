@@ -1,0 +1,295 @@
+import { spawnSync } from "node:child_process";
+import {
+  lstatSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterAll, beforeAll, describe, expect, test } from "vitest";
+
+const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const releaseDirectory = join(repositoryRoot, "release");
+const releaseScript = join(repositoryRoot, "scripts", "check-release.mjs");
+const versionScript = join(repositoryRoot, "scripts", "version-bump.mjs");
+const npmCli = process.env.npm_execpath;
+const expectedAssets = ["main.js", "manifest.json", "styles.css"];
+const stableSemver = /^\d+\.\d+\.\d+$/;
+let nonRootDirectory = "";
+
+function read(relativePath: string): string {
+  return readFileSync(join(repositoryRoot, relativePath), "utf8");
+}
+
+function json<T>(relativePath: string): T {
+  return JSON.parse(read(relativePath)) as T;
+}
+
+function run(
+  command: string,
+  args: string[],
+  options: { cwd?: string; env?: NodeJS.ProcessEnv } = {},
+) {
+  return spawnSync(command, args, {
+    cwd: options.cwd ?? repositoryRoot,
+    encoding: "utf8",
+    env: options.env ?? process.env,
+    shell: false,
+  });
+}
+
+function releaseSnapshot(): Map<string, Buffer> {
+  return new Map(
+    readdirSync(releaseDirectory).map((name) => [
+      name,
+      readFileSync(join(releaseDirectory, name)),
+    ]),
+  );
+}
+
+function expectFailedWithoutReplacing(args: string[]): void {
+  const before = releaseSnapshot();
+  const result = run(process.execPath, [releaseScript, ...args]);
+  expect(result.status, `${result.stdout}\n${result.stderr}`).not.toBe(0);
+  const after = releaseSnapshot();
+  expect([...after.keys()].sort()).toEqual([...before.keys()].sort());
+  for (const [name, bytes] of before) expect(after.get(name)).toEqual(bytes);
+}
+
+beforeAll(() => {
+  nonRootDirectory = mkdtempSync(join(tmpdir(), "picgo-release-test-"));
+  expect(npmCli, "npm_execpath must be available under npm test").toBeTruthy();
+  const result = run(
+    process.execPath,
+    [npmCli!, "--prefix", repositoryRoot, "run", "package"],
+    { cwd: nonRootDirectory },
+  );
+  expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+}, 60_000);
+
+afterAll(() => {
+  if (nonRootDirectory)
+    rmSync(nonRootDirectory, { recursive: true, force: true });
+});
+
+describe("release identity", () => {
+  test("keeps package, manifest, versions mapping, and stable tag aligned", () => {
+    const pkg = json<{ version: string }>("package.json");
+    const manifest = json<{
+      id: string;
+      name: string;
+      version: string;
+      minAppVersion: string;
+      isDesktopOnly: boolean;
+    }>("manifest.json");
+    const versions = json<Record<string, string>>("versions.json");
+
+    expect(pkg.version).toMatch(stableSemver);
+    expect(pkg.version).toBe("0.1.0");
+    expect(manifest).toMatchObject({
+      id: "picgo-auto-uploader",
+      name: "PicGo Auto Uploader",
+      version: pkg.version,
+      minAppVersion: "1.7.2",
+      isDesktopOnly: true,
+    });
+    expect(versions[pkg.version]).toBe(manifest.minAppVersion);
+    expect(`v${pkg.version}`).not.toMatch(stableSemver);
+  });
+
+  test("version consistency check is mutation-free", () => {
+    const before = ["package.json", "manifest.json", "versions.json"].map(read);
+    const result = run(process.execPath, [versionScript, "--check"]);
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(
+      ["package.json", "manifest.json", "versions.json"].map(read),
+    ).toEqual(before);
+  });
+});
+
+describe("repository release files", () => {
+  test("contains parseable release infrastructure and policy files", () => {
+    const required = [
+      "README.md",
+      "README.zh-CN.md",
+      "LICENSE",
+      "SECURITY.md",
+      "CONTRIBUTING.md",
+      "CHANGELOG.md",
+      ".github/workflows/ci.yml",
+      ".github/workflows/release.yml",
+      ".github/ISSUE_TEMPLATE/bug_report.yml",
+      ".github/ISSUE_TEMPLATE/feature_request.yml",
+      ".github/ISSUE_TEMPLATE/config.yml",
+      "scripts/check-release.mjs",
+      "scripts/version-bump.mjs",
+    ];
+    for (const path of required) expect(read(path).trim(), path).not.toBe("");
+    expect(() => json("package.json")).not.toThrow();
+    expect(() => json("manifest.json")).not.toThrow();
+    expect(() => json("versions.json")).not.toThrow();
+  });
+
+  test.each([
+    ["README.md", "English"],
+    ["README.zh-CN.md", "Chinese"],
+  ])("%s independently documents every safety boundary", (path, language) => {
+    const content = read(path);
+    const disclosures =
+      path === "README.md"
+        ? [
+            /Windows desktop only/i,
+            /Obsidian 1\.7\.2/i,
+            /only while Obsidian is open/i,
+            /http:\/\/127\.0\.0\.1:36677/i,
+            /\/heartbeat/i,
+            /\/upload/i,
+            /one image/i,
+            /png.*jpg.*jpeg.*gif.*webp.*bmp.*svg.*avif/is,
+            /orphan.*neither uploaded nor deleted/is,
+            /timeout.*disconnect.*uncertain/is,
+            /not automatically retried/i,
+            /saved remote URL.*without another upload/is,
+            /unchanged.*fingerprint/i,
+            /exact source identity/i,
+            /Vault.*\.trash/is,
+            /restore.*\.trash/is,
+            /file history/i,
+            /duplicate remote image/i,
+            /absolute Windows.*path/i,
+            /optional bearer secret/i,
+            /no telemetry/i,
+            /no returned-URL probe/i,
+            /data\.json/i,
+            /non-loopback HTTP/i,
+            /main\.js.*manifest\.json.*styles\.css/is,
+            /source ZIP/i,
+            /Open PicGo Auto Uploader status/i,
+            /Scan attachment folders now/i,
+            /Retry failed uploads/i,
+          ]
+        : [
+            /仅支持 Windows 桌面版/,
+            /Obsidian 1\.7\.2/,
+            /仅在 Obsidian 打开时/,
+            /http:\/\/127\.0\.0\.1:36677/,
+            /\/heartbeat/,
+            /\/upload/,
+            /每次.*一张图片/s,
+            /png.*jpg.*jpeg.*gif.*webp.*bmp.*svg.*avif/is,
+            /孤立.*既不会上传.*也不会删除/s,
+            /超时.*断开.*不确定/s,
+            /不会自动重试/,
+            /已保存.*远程 URL.*不会再次上传/s,
+            /指纹.*未变化/s,
+            /源文件身份/,
+            /Vault.*\.trash/is,
+            /从.*\.trash.*恢复/s,
+            /文件历史/,
+            /重复的远程图片/,
+            /Windows.*绝对路径/s,
+            /Bearer.*密钥/is,
+            /不收集遥测/,
+            /不会探测返回的 URL/,
+            /data\.json/,
+            /非本机.*HTTP/s,
+            /main\.js.*manifest\.json.*styles\.css/is,
+            /源码 ZIP/,
+            /Open PicGo Auto Uploader status/,
+            /Scan attachment folders now/,
+            /Retry failed uploads/,
+          ];
+    for (const disclosure of disclosures)
+      expect(content, `${language}: ${disclosure}`).toMatch(disclosure);
+  });
+});
+
+describe("release package", () => {
+  test("audit resolves the repository independently of caller directory", () => {
+    const result = run(process.execPath, [releaseScript], {
+      cwd: nonRootDirectory,
+    });
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+  });
+
+  test("contains exactly three non-empty regular assets", () => {
+    expect(readdirSync(releaseDirectory).sort()).toEqual(expectedAssets);
+    for (const name of expectedAssets) {
+      const stat = lstatSync(join(releaseDirectory, name));
+      expect(stat.isFile(), name).toBe(true);
+      expect(stat.isSymbolicLink(), name).toBe(false);
+      expect(stat.size, name).toBeGreaterThan(0);
+    }
+    expect(readFileSync(join(releaseDirectory, "manifest.json"))).toEqual(
+      readFileSync(join(repositoryRoot, "manifest.json")),
+    );
+    expect(read("release/main.js")).not.toMatch(/sourceMappingURL/);
+  });
+
+  test("contains no checkout, home, credential sentinel, or concrete token", () => {
+    const assets = expectedAssets
+      .map((name) => read(`release/${name}`))
+      .join("\n");
+    const pathVariants = [
+      repositoryRoot,
+      process.cwd(),
+      process.env.USERPROFILE,
+    ]
+      .filter((value): value is string => Boolean(value))
+      .flatMap((value) => [value, value.replaceAll("\\", "/")]);
+    for (const privatePath of new Set(pathVariants))
+      expect(assets).not.toContain(privatePath);
+    expect(assets).not.toMatch(/PICGO_TEST_SECRET|known-secret-sentinel/i);
+    expect(assets).not.toMatch(
+      /(?:ghp|github_pat|sk-[A-Za-z0-9_-]*)_[A-Za-z0-9_-]{20,}/,
+    );
+  });
+
+  test("rejects mismatched and v-prefixed tags without replacing valid assets", () => {
+    expectFailedWithoutReplacing(["--tag", "0.1.1"]);
+    expectFailedWithoutReplacing(["--tag", "v0.1.0"]);
+  });
+});
+
+describe("workflow policy", () => {
+  test("CI is read-only, cross-platform, pinned, and cancels stale runs", () => {
+    const workflow = read(".github/workflows/ci.yml");
+    expect(workflow).toMatch(/push:[\s\S]*main/);
+    expect(workflow).toMatch(/pull_request:/);
+    expect(workflow).toMatch(/contents:\s*read/);
+    expect(workflow).toMatch(/cancel-in-progress:\s*true/);
+    expect(workflow).toMatch(/ubuntu-latest/);
+    expect(workflow).toMatch(/windows-latest/);
+    expect(workflow).toMatch(/node-version:\s*["']22\.12\.0["']/);
+    expect(workflow).toMatch(/timeout-minutes:\s*20/);
+    expect(workflow).toMatch(/npm ci/);
+    expect(workflow).toMatch(/npm run check/);
+    expect(workflow).not.toMatch(/secrets\./);
+    expect(workflow).not.toMatch(/contents:\s*write/);
+    expect(workflow).not.toMatch(/uses:\s*[^\s@]+@v\d/);
+  });
+
+  test("release uses minimal provenance permissions and publishes only audited assets", () => {
+    const workflow = read(".github/workflows/release.yml");
+    expect(workflow).toMatch(/tags:\s*\n\s*- ["']\*\*?['"]/);
+    expect(workflow).toMatch(/contents:\s*write/);
+    expect(workflow).toMatch(/id-token:\s*write/);
+    expect(workflow).toMatch(/attestations:\s*write/);
+    expect(workflow).toMatch(/artifact-metadata:\s*write/);
+    expect(workflow).toMatch(/persist-credentials:\s*false/);
+    expect(workflow).toMatch(/package-manager-cache:\s*false/);
+    expect(workflow).toMatch(/RELEASE_TAG:\s*\$\{\{ github\.ref_name \}\}/);
+    expect(workflow).toMatch(/npm ci/);
+    expect(workflow).toMatch(/npm run check/);
+    expect(workflow).toMatch(/retention-days:\s*[1-9]/);
+    expect(workflow).toMatch(/gh release create.*--draft/);
+    expect(workflow).toMatch(/gh release edit.*--draft=false.*--latest/);
+    expect(workflow).toMatch(/release\/main\.js/);
+    expect(workflow).toMatch(/release\/manifest\.json/);
+    expect(workflow).toMatch(/release\/styles\.css/);
+    expect(workflow).not.toMatch(/uses:\s*[^\s@]+@v\d/);
+  });
+});

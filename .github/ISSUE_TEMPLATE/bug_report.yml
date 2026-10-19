@@ -1,0 +1,86 @@
+name: Bug report
+description: Report a reproducible PicGo Auto Uploader problem without private data.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For security vulnerabilities, use the private Security Advisory link instead. Remove credentials, private Vault content, image data, and absolute paths before submitting.
+  - type: input
+    id: plugin-version
+    attributes:
+      label: Plugin version
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: obsidian-version
+    attributes:
+      label: Obsidian version
+    validations:
+      required: true
+  - type: input
+    id: windows-version
+    attributes:
+      label: Windows version
+    validations:
+      required: true
+  - type: input
+    id: picgo-version
+    attributes:
+      label: PicGo version
+    validations:
+      required: true
+  - type: input
+    id: provider
+    attributes:
+      label: Image provider and integration
+      description: Name the provider and uploader plugin, but do not include credentials.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Use synthetic file names and paths.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: dropdown
+    id: source-exists
+    attributes:
+      label: Does the source attachment still exist locally?
+      options:
+        - "Yes"
+        - "No"
+        - "Unsure"
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostic export
+      description: Export from the status center, then inspect and remove remaining private details before pasting.
+      render: json
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety confirmation
+      options:
+        - label: I have a backup or file history for the affected Vault.
+          required: true
+        - label: I removed secrets, credentials, private paths, note contents, and image data.
+          required: true

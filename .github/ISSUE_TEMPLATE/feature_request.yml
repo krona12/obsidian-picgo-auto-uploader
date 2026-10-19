@@ -1,0 +1,39 @@
+name: Feature request
+description: Propose a behavior with its safety, privacy, and network implications.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use case
+      description: What workflow or problem needs improvement?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Safety, privacy, and network impact
+      description: Explain effects on local deletion, retries, Vault reads, transmitted paths/images, credentials, or remote services.
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy confirmation
+      options:
+        - label: This request contains no credentials, absolute private paths, private Vault content, or real image data.
+          required: true

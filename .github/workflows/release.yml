@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "*"
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Audit and publish release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - name: Check out verified tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js without privileged cache restore
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22.12.0"
+          package-manager-cache: false
+      - name: Install exact dependencies
+        run: npm ci
+      - name: Verify source and build release package
+        run: npm run check
+      - name: Attest release assets
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: |
+            release/main.js
+            release/manifest.json
+            release/styles.css
+      - name: Preserve audited workflow artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: picgo-auto-uploader-${{ github.ref_name }}
+          path: |
+            release/main.js
+            release/manifest.json
+            release/styles.css
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+      - name: Create draft with exact assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists; refusing to replace it." >&2
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" --verify-tag --draft --latest=false --title "PicGo Auto Uploader $RELEASE_TAG" --notes-from-tag release/main.js release/manifest.json release/styles.css
+      - name: Verify remote assets and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          expected=$(printf '%s\n' main.js manifest.json styles.css)
+          actual=$(gh api "repos/${{ github.repository }}/releases/tags/$RELEASE_TAG" --jq '.assets | map(.name) | sort | .[]')
+          if [ "$actual" != "$expected" ]; then
+            printf 'Unexpected remote assets.\nExpected:\n%s\nActual:\n%s\n' "$expected" "$actual" >&2
+            exit 1
+          fi
+          gh release edit "$RELEASE_TAG" --draft=false --latest

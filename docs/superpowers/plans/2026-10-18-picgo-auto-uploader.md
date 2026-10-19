@@ -33,11 +33,13 @@
 ### Task 1: Project foundation, domain types, and path/settings policy
 
 **Files:**
+
 - Create: `package.json`, `package-lock.json`, `tsconfig.json`, `esbuild.config.mjs`, `vitest.config.ts`, `eslint.config.mjs`, `.gitignore`, `.editorconfig`
 - Create: `manifest.json`, `versions.json`, `src/domain.ts`, `src/defaults.ts`, `src/path-policy.ts`
 - Test: `tests/path-policy.test.ts`, `tests/defaults.test.ts`
 
 **Interfaces:**
+
 - Produces `PluginSettings`, `JobRecord`, `JobState`, `LogEntry`, `SourceFingerprint`, `Result<T,E>` in `src/domain.ts`.
 - Produces `DEFAULT_SETTINGS`, `validateSettings(input)`, `sanitizeSettings(input)` in `src/defaults.ts`.
 - Produces `normalizeVaultPath(path)`, `isEligibleAttachment(path, settings)`, `isPathInsideFolder(path, folder)` in `src/path-policy.ts`.
@@ -51,10 +53,12 @@
 ### Task 2: PicGo protocol and redacted diagnostics
 
 **Files:**
+
 - Create: `src/picgo-client.ts`, `src/redaction.ts`
 - Test: `tests/picgo-client.test.ts`, `tests/redaction.test.ts`
 
 **Interfaces:**
+
 - Consumes `Result` and PicGo settings from Task 1.
 - Produces `PicGoTransport.request(request, signal)`, `NodePicGoTransport`, `PicGoClient.heartbeat(signal)`, and `PicGoClient.uploadOne(absolutePath, signal)`.
 - Produces `redactText(text, secrets, absolutePaths)` and `createDiagnosticExport(snapshot)`.
@@ -68,10 +72,12 @@
 ### Task 3: Persistent jobs, stability gate, and sequential queue
 
 **Files:**
+
 - Create: `src/job-store.ts`, `src/stability-gate.ts`, `src/upload-queue.ts`
 - Test: `tests/job-store.test.ts`, `tests/stability-gate.test.ts`, `tests/upload-queue.test.ts`
 
 **Interfaces:**
+
 - Consumes Task 1 domain types and settings.
 - Produces `JobPersistence.load/save`, `JobStore.hydrate/snapshot/upsert/transition/appendLog/prune`, and `JobStore.subscribe`.
 - Produces `FileProbe.stat(path)`, `StabilityGate.wait(path, options, signal)`, and `UploadQueue.enqueue/cancelPending/retrySafeFailures/drain`.
@@ -85,10 +91,12 @@
 ### Task 4: Conservative Markdown reference planning and rewriting
 
 **Files:**
+
 - Create: `src/reference-rewriter.ts`, `src/obsidian/reference-service.ts`
 - Test: `tests/reference-rewriter.test.ts`, `tests/reference-service.test.ts`
 
 **Interfaces:**
+
 - Consumes `SourceFingerprint`, `Result`, and normalized target paths.
 - Produces `EmbedReference`, `RewriteEdit`, `ReferenceDiscovery`, `buildRewriteEdit(reference, remoteUrl)`, and `applyVerifiedEdits(content, edits)`.
 - Produces `ObsidianReferenceService.discover(target)`, `rewrite(plan, remoteUrl)`, `waitForRefresh(paths, signal)`, and `verifyNoLocalReferences(target)`.
@@ -103,10 +111,12 @@
 ### Task 5: Guarded attachment processor and Obsidian controller
 
 **Files:**
+
 - Create: `src/attachment-processor.ts`, `src/obsidian/controller.ts`, `src/obsidian/vault-adapter.ts`
 - Test: `tests/attachment-processor.test.ts`, `tests/controller.test.ts`
 
 **Interfaces:**
+
 - Consumes `PathPolicy`, `StabilityGate`, `JobStore`, `PicGoClient`, `ObsidianReferenceService`, and `UploadQueue` from Tasks 1-4.
 - Produces `AttachmentProcessor.process(vaultPath, signal)` and `AutoUploaderController.start/stop/scanNow/retrySafeFailures/cancelPending`.
 - Produces an observable `ControllerSnapshot` for UI consumers.
@@ -121,10 +131,12 @@
 ### Task 6: Native UI, localization, and plugin entry point
 
 **Files:**
+
 - Create: `src/i18n.ts`, `src/ui/settings-tab.ts`, `src/ui/status-modal.ts`, `src/ui/status-bar.ts`, `src/main.ts`, `styles.css`
 - Test: `tests/i18n.test.ts`, `tests/settings-ui.test.ts`, `tests/status-ui.test.ts`, `tests/main.test.ts`
 
 **Interfaces:**
+
 - Consumes `ControllerSnapshot`, commands, settings validation, PicGo heartbeat, diagnostics, and persistence from Tasks 1-5.
 - Produces `t(locale, key, params)`, `PicGoAutoUploaderSettingTab`, `StatusModal`, `StatusBarPresenter`, and default export `PicGoAutoUploaderPlugin`.
 
@@ -137,12 +149,14 @@
 ### Task 7: Documentation, CI, release packaging, and GitHub publication
 
 **Files:**
+
 - Create: `README.md`, `README.zh-CN.md`, `LICENSE`, `SECURITY.md`, `CONTRIBUTING.md`, `CHANGELOG.md`
 - Create: `.github/workflows/ci.yml`, `.github/workflows/release.yml`, `.github/ISSUE_TEMPLATE/bug_report.yml`, `.github/ISSUE_TEMPLATE/feature_request.yml`
 - Create: `scripts/check-release.mjs`, `scripts/version-bump.mjs`
 - Test: `tests/release-package.test.ts`
 
 **Interfaces:**
+
 - Consumes the built `main.js`, root `manifest.json`, and `styles.css`.
 - Produces repeatable commands `npm run check`, `npm run package`, and `npm run version` plus GitHub release assets for tag `0.1.0`.
 
