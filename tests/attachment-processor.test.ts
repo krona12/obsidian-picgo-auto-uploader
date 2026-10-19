@@ -18,6 +18,7 @@ describe("deletion proof", () => {
     currentFingerprint: { size: 10, mtime: 1 },
     active: true,
     exactSourceExists: true,
+    referenceProofValid: true,
   };
   it("allows trash only with every independently established proof", () => {
     expect(canTrash(proof)).toBe(true);
@@ -34,6 +35,7 @@ describe("deletion proof", () => {
     { currentFingerprint: null },
     { active: false },
     { exactSourceExists: false },
+    { referenceProofValid: false },
   ])("retains source when one proof is absent: %j", (patch) => {
     expect(canTrash({ ...proof, ...patch })).toBe(false);
   });
@@ -97,6 +99,38 @@ describe("attachment processing with real collaborators", () => {
       expect(f.writes).toEqual([]);
     },
   );
+  it("does not safely retry an ambiguous malformed 200 upload response", async () => {
+    const f = fixture();
+    f.setResponse({
+      ok: true,
+      value: { statusCode: 200, body: "not JSON" },
+    });
+    await f.run();
+    expect(f.job()).toMatchObject({
+      state: "uncertain",
+      failure: { retry: "uncertain" },
+    });
+    expect(f.uploads()).toBe(1);
+
+    await f.queue.retrySafeFailures();
+    await f.queue.drain();
+    expect(f.uploads()).toBe(1);
+
+    f.setResponse({
+      ok: true,
+      value: {
+        statusCode: 200,
+        body: JSON.stringify({
+          success: true,
+          result: ["https://cdn.test/image.png"],
+        }),
+      },
+    });
+    await f.queue.retry(f.source.path, { acknowledgeUncertain: true });
+    await f.queue.drain();
+    expect(f.uploads()).toBe(2);
+    expect(f.job().state).toBe("trashed");
+  });
   it("persists exact partial rewrites and resumes without uploading twice", async () => {
     const f = fixture();
     const second = f.add("second.md", "![[attachments/image.png]]");
@@ -286,6 +320,57 @@ describe("attachment processing with real collaborators", () => {
       failure: { code: "source-changed", stage: "verify" },
     });
     expect(f.trash).toEqual([]);
+  });
+  it("retains the source when a new protected note appears during the final stat", async () => {
+    const f = fixture();
+    f.statHook(() => {
+      if (f.statReads() !== 4) return;
+      const late = f.add("late.md", "![[attachments/image.png]]");
+      f.vaultEvent("create", late);
+    });
+    await f.run();
+    expect(f.text.get(f.files.find((file) => file.path === "late.md")!)).toBe(
+      "![[attachments/image.png]]",
+    );
+    expect(f.trash).toEqual([]);
+    expect(f.job().state).toBe("failed");
+  });
+  it.each(["modify", "rename", "delete"] as const)(
+    "invalidates final reference proof on protected-file %s",
+    async (event) => {
+      const f = fixture();
+      f.statHook(() => {
+        if (f.statReads() === 4)
+          f.vaultEvent(
+            event,
+            f.note,
+            event === "rename" ? "old.md" : undefined,
+          );
+      });
+      await f.run();
+      expect(f.trash).toEqual([]);
+      expect(f.job().state).toBe("failed");
+    },
+  );
+  it("invalidates final reference proof on unrelated attachment topology changes", async () => {
+    const f = fixture();
+    f.statHook(() => {
+      if (f.statReads() !== 4) return;
+      const other = f.add("attachments/other.png");
+      f.vaultEvent("create", other);
+    });
+    await f.run();
+    expect(f.trash).toEqual([]);
+    expect(f.job().state).toBe("failed");
+  });
+  it("invalidates final reference proof on metadata-only resolution changes", async () => {
+    const f = fixture();
+    f.statHook(() => {
+      if (f.statReads() === 4) f.metadataEvent("resolve");
+    });
+    await f.run();
+    expect(f.trash).toEqual([]);
+    expect(f.job().state).toBe("failed");
   });
   it("unexpected stability exceptions settle safely", async () => {
     const f = fixture();

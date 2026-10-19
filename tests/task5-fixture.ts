@@ -1,6 +1,10 @@
 import type { CachedMetadata, EventRef, TFile, Vault } from "obsidian";
 import { sanitizeSettings } from "../src/defaults";
-import { JobStore, type JobSnapshot } from "../src/job-store";
+import {
+  JobStore,
+  type JobSnapshot,
+  type JobStoreOptions,
+} from "../src/job-store";
 import { PicGoClient, type PicGoTransportResult } from "../src/picgo-client";
 import { StabilityGate } from "../src/stability-gate";
 import {
@@ -12,7 +16,7 @@ import { ObsidianVaultAdapter } from "../src/obsidian/vault-adapter";
 import { AttachmentProcessor } from "../src/attachment-processor";
 import { UploadQueue } from "../src/upload-queue";
 
-export function fixture(initial?: JobSnapshot) {
+export function fixture(initial?: JobSnapshot, storeOptions?: JobStoreOptions) {
   const settings = sanitizeSettings({
     quietPeriodMs: 10,
     stabilitySampleIntervalMs: 1,
@@ -22,11 +26,18 @@ export function fixture(initial?: JobSnapshot) {
   const files: TFile[] = [];
   const text = new Map<TFile, string>();
   const caches = new Map<TFile, CachedMetadata>();
+  type MetadataEventName = "changed" | "deleted" | "resolve" | "resolved";
+  type MetadataEventCallback = (...args: unknown[]) => void;
   const metadataListeners = new Map<
     EventRef,
-    (file: TFile, data: string, cache: CachedMetadata) => void
+    { name: MetadataEventName; callback: MetadataEventCallback }
   >();
-  const eventListeners = new Map<EventRef, (file: TFile) => void>();
+  type VaultEventName = "create" | "modify" | "rename" | "delete";
+  type VaultEventCallback = (file: TFile, oldPath?: string) => void;
+  const eventListeners = new Map<
+    EventRef,
+    { name: VaultEventName; callback: VaultEventCallback }
+  >();
   const readyListeners = new Set<() => void>();
   const writes: string[] = [];
   const trash: string[] = [];
@@ -57,6 +68,8 @@ export function fixture(initial?: JobSnapshot) {
   };
   const vault: ReferenceVault & {
     trash(file: TFile, system: boolean): Promise<void>;
+    on(name: VaultEventName, callback: VaultEventCallback): EventRef;
+    offref(ref: EventRef): void;
   } = {
     getFiles: () => [...files],
     getMarkdownFiles: () => files.filter((f) => f.extension === "md"),
@@ -72,7 +85,8 @@ export function fixture(initial?: JobSnapshot) {
       writes.push(file.path);
       caches.set(file, {});
       if (refresh)
-        for (const cb of metadataListeners.values()) cb(file, next, {});
+        for (const listener of metadataListeners.values())
+          if (listener.name === "changed") listener.callback(file, next, {});
       afterWrite?.();
       return next;
     },
@@ -82,13 +96,27 @@ export function fixture(initial?: JobSnapshot) {
       trash.push(file.path);
       files.splice(files.indexOf(file), 1);
     },
+    on(name, callback) {
+      const ref = {};
+      eventListeners.set(ref, {
+        name,
+        callback: callback as unknown as VaultEventCallback,
+      });
+      return ref;
+    },
+    offref(ref) {
+      eventListeners.delete(ref);
+    },
   };
   const metadata: ReferenceMetadata = {
     getFileCache: (file) => caches.get(file) ?? null,
     getFirstLinkpathDest: (link) => files.find((f) => f.path === link) ?? null,
-    on(_name, cb) {
+    on(name, cb) {
       const ref = {};
-      metadataListeners.set(ref, cb);
+      metadataListeners.set(ref, {
+        name,
+        callback: cb as unknown as MetadataEventCallback,
+      });
       return ref;
     },
     offref(ref) {
@@ -103,7 +131,7 @@ export function fixture(initial?: JobSnapshot) {
       basename: name.slice(0, name.lastIndexOf(".")),
       extension: name.split(".").at(-1)!,
       parent: null,
-      vault: vault as Vault,
+      vault: vault as unknown as Vault,
       stat: { ctime: 1, mtime: 2, size: content.length },
     };
     files.push(file);
@@ -126,23 +154,26 @@ export function fixture(initial?: JobSnapshot) {
   }
   const source = add("attachments/image.png");
   const note = add("note.md", "![[attachments/image.png]]");
-  const store = new JobStore({
-    async load() {
-      return initial ? structuredClone(initial) : null;
+  const store = new JobStore(
+    {
+      async load() {
+        return initial ? structuredClone(initial) : null;
+      },
+      async save(snapshot) {
+        if (failLog && snapshot.logs.length) {
+          failLog = false;
+          throw new Error("C:\\private\\log private-secret");
+        }
+        if (snapshot.jobs[0]?.state === saveFailureState) {
+          saveFailures++;
+          saveFailureState = "";
+          throw new Error("C:\\private\\persistence private-secret");
+        }
+        checkpoints.push(structuredClone(snapshot));
+      },
     },
-    async save(snapshot) {
-      if (failLog && snapshot.logs.length) {
-        failLog = false;
-        throw new Error("C:\\private\\log private-secret");
-      }
-      if (snapshot.jobs[0]?.state === saveFailureState) {
-        saveFailures++;
-        saveFailureState = "";
-        throw new Error("C:\\private\\persistence private-secret");
-      }
-      checkpoints.push(structuredClone(snapshot));
-    },
-  });
+    storeOptions,
+  );
   const adapter = new ObsidianVaultAdapter({
     ...vault,
     adapter: {
@@ -154,14 +185,8 @@ export function fixture(initial?: JobSnapshot) {
         return file ? { ...file.stat, type: "file" as const } : null;
       },
     },
-    on(_name, callback) {
-      const ref = {};
-      eventListeners.set(ref, callback);
-      return ref;
-    },
-    offref(ref) {
-      eventListeners.delete(ref);
-    },
+    on: vault.on,
+    offref: vault.offref,
   });
   const client = new PicGoClient(settings, {
     async request(_request, signal) {
@@ -242,7 +267,22 @@ export function fixture(initial?: JobSnapshot) {
       for (const cb of [...readyListeners]) cb();
     },
     event: (file = source) => {
-      for (const cb of eventListeners.values()) cb(file);
+      for (const listener of eventListeners.values())
+        if (listener.name === "create") listener.callback(file);
+    },
+    vaultEvent: (name: VaultEventName, file: TFile, oldPath?: string) => {
+      for (const listener of eventListeners.values())
+        if (listener.name === name) listener.callback(file, oldPath);
+    },
+    metadataEvent: (name: MetadataEventName, file = note) => {
+      for (const listener of metadataListeners.values()) {
+        if (listener.name !== name) continue;
+        if (name === "changed")
+          listener.callback(file, text.get(file) ?? "", {});
+        else if (name === "deleted") listener.callback(file, null);
+        else if (name === "resolve") listener.callback(file);
+        else listener.callback();
+      }
     },
     uploads: () => uploads,
     statReads: () => statReads,

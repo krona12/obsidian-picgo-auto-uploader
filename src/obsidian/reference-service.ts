@@ -2,6 +2,7 @@ import type {
   CachedMetadata,
   EventRef,
   MetadataCache,
+  TAbstractFile,
   TFile,
   Vault,
 } from "obsidian";
@@ -20,10 +21,20 @@ import {
   type ReferenceDiscovery,
   type RewriteEdit,
 } from "../reference-rewriter";
-export type ReferenceVault = Pick<
+export interface ReferenceVault extends Pick<
   Vault,
   "getFiles" | "getMarkdownFiles" | "read" | "process"
->;
+> {
+  on(
+    name: "create" | "modify" | "delete",
+    callback: (file: TAbstractFile) => void,
+  ): EventRef;
+  on(
+    name: "rename",
+    callback: (file: TAbstractFile, oldPath: string) => void,
+  ): EventRef;
+  offref(ref: EventRef): void;
+}
 export interface ReferenceMetadata extends Pick<
   MetadataCache,
   "getFileCache" | "getFirstLinkpathDest"
@@ -32,6 +43,12 @@ export interface ReferenceMetadata extends Pick<
     name: "changed",
     callback: (file: TFile, data: string, cache: CachedMetadata) => void,
   ): EventRef;
+  on(
+    name: "deleted",
+    callback: (file: TFile, previousCache: CachedMetadata | null) => void,
+  ): EventRef;
+  on(name: "resolve", callback: (file: TFile) => void): EventRef;
+  on(name: "resolved", callback: () => void): EventRef;
   offref(ref: EventRef): void;
 }
 export interface RewriteSummary {
@@ -39,6 +56,10 @@ export interface RewriteSummary {
   rewrittenReferenceCount: number;
 }
 export type RewriteFailure = ReferenceBlocker & RewriteSummary;
+export interface ReferenceMutationProof {
+  isValid(): boolean;
+  release(): void;
+}
 
 type RefreshResult = Result<void, ReferenceBlocker>;
 interface RefreshWatch {
@@ -149,6 +170,47 @@ export class ObsidianReferenceService {
     private readonly vault: ReferenceVault,
     private readonly metadata: ReferenceMetadata,
   ) {}
+
+  /** Start before final discovery so every protected Vault mutation invalidates it. */
+  captureMutationProof(): ReferenceMutationProof {
+    let valid = true;
+    let released = false;
+    const releases: Array<() => void> = [];
+    const invalidate = () => {
+      // Any Vault topology/content mutation can change contextual basename
+      // resolution, even when the mutated file itself is not scanned.
+      valid = false;
+    };
+    try {
+      for (const name of ["create", "modify", "delete"] as const) {
+        const ref = this.vault.on(name, invalidate);
+        releases.push(() => this.vault.offref(ref));
+      }
+      const rename = this.vault.on("rename", invalidate);
+      releases.push(() => this.vault.offref(rename));
+      // Metadata can be re-resolved after a cache refresh without another Vault
+      // event; that also invalidates the proof captured for final discovery.
+      const changed = this.metadata.on("changed", invalidate);
+      releases.push(() => this.metadata.offref(changed));
+      const deleted = this.metadata.on("deleted", invalidate);
+      releases.push(() => this.metadata.offref(deleted));
+      const resolve = this.metadata.on("resolve", invalidate);
+      releases.push(() => this.metadata.offref(resolve));
+      const resolved = this.metadata.on("resolved", invalidate);
+      releases.push(() => this.metadata.offref(resolved));
+    } catch {
+      valid = false;
+      for (const release of releases.splice(0)) release();
+    }
+    return {
+      isValid: () => valid && !released,
+      release: () => {
+        if (released) return;
+        released = true;
+        for (const remove of releases.splice(0)) remove();
+      },
+    };
+  }
 
   async discover(target: TFile): Promise<ReferenceDiscovery> {
     // A fresh attempt may recover after a timed-out/aborted prior attempt. Its full

@@ -206,6 +206,7 @@ function object(value: unknown): Record<string, unknown> | undefined {
 
 function parseResponse(
   response: PicGoResponse,
+  ambiguousFailure: boolean,
 ): Result<Record<string, unknown>, PicGoFailure> {
   if (response.statusCode < 200 || response.statusCode >= 300)
     return failure(
@@ -216,11 +217,19 @@ function parseResponse(
   try {
     body = JSON.parse(response.body);
   } catch {
-    return failure("invalid-response", "PicGo returned invalid JSON.");
+    return failure(
+      "invalid-response",
+      "PicGo returned invalid JSON.",
+      ambiguousFailure ? "uncertain" : "failed",
+    );
   }
   const data = object(body);
   if (!data || data.success !== true || data.error)
-    return failure("picgo-failure", "PicGo did not confirm success.");
+    return failure(
+      "picgo-failure",
+      "PicGo did not confirm success.",
+      ambiguousFailure ? "uncertain" : "failed",
+    );
   return { ok: true, value: data };
 }
 
@@ -296,6 +305,7 @@ export class PicGoClient {
       return failure(
         "invalid-result",
         "PicGo did not return exactly one valid image URL.",
+        "uncertain",
       );
     const url = data.result[0];
     if ("items" in data) {
@@ -303,6 +313,7 @@ export class PicGoClient {
         return failure(
           "invalid-items",
           "PicGo returned inconsistent item metadata.",
+          "uncertain",
         );
       const item = object(data.items[0]);
       if (
@@ -315,6 +326,7 @@ export class PicGoClient {
         return failure(
           "invalid-items",
           "PicGo returned inconsistent item metadata.",
+          "uncertain",
         );
     }
     return { ok: true, value: url };
@@ -362,10 +374,10 @@ export class PicGoClient {
       return failure(
         "transport-failure",
         "PicGo request ended without a confirmed result.",
-        "uncertain",
+        endpoint === "upload" ? "uncertain" : "failed",
       );
     }
-    if (result.ok) return parseResponse(result.value);
+    if (result.ok) return parseResponse(result.value, endpoint === "upload");
     const error = result.error;
     if (error.kind === "aborted" && !error.dispatched)
       return failure(
@@ -377,19 +389,20 @@ export class PicGoClient {
       return failure(
         "invalid-request",
         "PicGo request could not be constructed.",
-        "skipped",
+        endpoint === "upload" && error.dispatched ? "uncertain" : "skipped",
       );
     if (error.kind === "response-too-large")
       return failure(
         error.kind,
         "PicGo response exceeded the metadata size limit.",
+        endpoint === "upload" && error.dispatched ? "uncertain" : "failed",
       );
     if (error.kind === "refused")
       return failure("connection-refused", "PicGo refused the connection.");
     return failure(
       error.kind,
       "PicGo request ended without a confirmed result.",
-      error.dispatched ? "uncertain" : "failed",
+      endpoint === "upload" && error.dispatched ? "uncertain" : "failed",
     );
   }
 }

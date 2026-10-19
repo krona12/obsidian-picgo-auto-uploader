@@ -1,12 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AutoUploaderController } from "../src/obsidian/controller";
 import { fixture } from "./task5-fixture";
-import type { JobSnapshot } from "../src/job-store";
+import type { JobSnapshot, JobStoreOptions } from "../src/job-store";
 import type { JobRecord, JobState } from "../src/domain";
 
 afterEach(() => vi.useRealTimers());
-function setup(enabled = true, initial?: JobSnapshot) {
-  const f = fixture(initial);
+function setup(
+  enabled = true,
+  initial?: JobSnapshot,
+  storeOptions?: JobStoreOptions,
+) {
+  const f = fixture(initial, storeOptions);
   f.settings.enabled = enabled;
   const controller = new AutoUploaderController({
     settings: f.settings,
@@ -66,6 +70,55 @@ describe("controller lifecycle", () => {
     expect(f.job().state).toBe("trashed");
     await f.controller.stop();
   });
+  it("bounds repeated orphan retry logs during ordinary reconciliation", async () => {
+    vi.useFakeTimers();
+    const f = setup(true, undefined, {
+      historyMaxEntries: 2,
+      historyMaxAgeDays: 30,
+    });
+    f.files.splice(f.files.indexOf(f.note), 1);
+    f.controller.start();
+    f.ready();
+    await f.controller.scanNow();
+    await f.queue.drain();
+    for (let index = 0; index < 5; index++) {
+      await vi.advanceTimersByTimeAsync(100);
+      await f.queue.drain();
+    }
+    expect(f.store.snapshot().logs.length).toBeLessThanOrEqual(2);
+    expect(f.job().state).toBe("skipped");
+    await f.controller.stop();
+  });
+  it("advances age retention during an idle reconciliation scan", async () => {
+    const initial: JobSnapshot = {
+      jobs: [
+        {
+          vaultPath: "old.png",
+          state: "trashed",
+          createdAt: 0,
+          updatedAt: 0,
+          rewrittenNotePaths: [],
+          rewrittenReferenceCount: 0,
+        },
+      ],
+      logs: [
+        {
+          timestamp: 0,
+          level: "info",
+          stage: "trash",
+          code: "old",
+          message: "Old.",
+        },
+      ],
+    };
+    const f = setup(true, initial, { historyMaxAgeDays: 1 });
+    f.files.length = 0;
+    await f.store.hydrate();
+    f.controller.start();
+    await f.controller.scanNow();
+    expect(f.store.snapshot()).toEqual({ jobs: [], logs: [] });
+    await f.controller.stop();
+  });
   it("safe failure event retry requires a different persisted fingerprint", async () => {
     vi.useFakeTimers();
     const f = setup();
@@ -84,6 +137,43 @@ describe("controller lifecycle", () => {
     await vi.advanceTimersByTimeAsync(10);
     await f.queue.drain();
     expect(f.uploads()).toBe(2);
+    await f.controller.stop();
+  });
+  it("processes a restored trashed path as a new generation even with the same fingerprint", async () => {
+    vi.useFakeTimers();
+    const f = setup();
+    f.controller.start();
+    f.ready();
+    await f.controller.scanNow();
+    await f.queue.drain();
+    const restored = f.add("attachments/image.png");
+    f.add("new.md", "![[attachments/image.png]]");
+    f.event(restored);
+    await vi.advanceTimersByTimeAsync(10);
+    await f.queue.drain();
+    expect(f.uploads()).toBe(2);
+    expect(f.text.get(f.files.find((file) => file.path === "new.md")!)).toBe(
+      "![](<https://cdn.test/image.png>)",
+    );
+    expect(f.trash).toEqual(["attachments/image.png", "attachments/image.png"]);
+    await f.controller.stop();
+  });
+  it("deduplicates concurrent scan and event discovery of changed restored bytes", async () => {
+    vi.useFakeTimers();
+    const f = setup();
+    f.controller.start();
+    f.ready();
+    await f.controller.scanNow();
+    await f.queue.drain();
+    const restored = f.add("attachments/image.png", "new bytes");
+    f.add("new.md", "![[attachments/image.png]]");
+    f.event(restored);
+    const scan = f.controller.scanNow();
+    await vi.advanceTimersByTimeAsync(10);
+    await scan;
+    await f.queue.drain();
+    expect(f.uploads()).toBe(2);
+    expect(f.trash).toEqual(["attachments/image.png", "attachments/image.png"]);
     await f.controller.stop();
   });
   it("disabled automation permits manual scan and acknowledged uncertain retry", async () => {

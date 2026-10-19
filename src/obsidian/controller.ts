@@ -153,6 +153,11 @@ export class AutoUploaderController {
   ): Promise<ScanResult> {
     const result: ScanResult = { eligible: 0, enqueued: 0, failed: 0 };
     try {
+      await this.dependencies.store.prune();
+    } catch {
+      result.failed++;
+    }
+    try {
       const paths = [
         ...new Set([
           ...this.dependencies.lifecycle.listPaths(),
@@ -176,9 +181,12 @@ export class AutoUploaderController {
         if (!eligible && previous?.state !== "uploading") continue;
         if (eligible) result.eligible++;
         const enqueued =
-          previous?.state === "skipped" && previous.failure?.code === "orphan"
-            ? await this.dependencies.queue.retry(path)
-            : await this.dependencies.queue.recover(path);
+          previous?.state === "trashed"
+            ? await this.dependencies.queue.enqueueNewGeneration(path)
+            : previous?.state === "skipped" &&
+                previous.failure?.code === "orphan"
+              ? await this.dependencies.queue.retry(path)
+              : await this.dependencies.queue.recover(path);
         if (!enqueued.ok) result.failed++;
         else if (enqueued.value === "enqueued") result.enqueued++;
       }
@@ -276,6 +284,12 @@ export class AutoUploaderController {
     if (!active()) return;
     const job = this.job(path);
     if (job && isTerminalState(job.state)) {
+      if (job.state === "trashed") {
+        const fingerprint = await this.dependencies.lifecycle.stat(path);
+        if (active() && fingerprint)
+          await this.dependencies.queue.enqueueNewGeneration(path);
+        return;
+      }
       if (
         job.state === "uncertain" ||
         job.failure?.retry !== "safe" ||

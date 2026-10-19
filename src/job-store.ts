@@ -114,6 +114,36 @@ function validLog(value: unknown): value is LogEntry {
   );
 }
 
+function retainedSnapshot(
+  snapshot: JobSnapshot,
+  maxEntries: number,
+  maxAgeDays: number,
+  now: number,
+): JobSnapshot {
+  const cutoff = now - maxAgeDays * 86400000;
+  const retainedCompletions = new Set(
+    snapshot.jobs
+      .map((job, index) => ({ job, index }))
+      .filter(({ job }) => job.state === "trashed" && job.updatedAt >= cutoff)
+      .sort(
+        (left, right) =>
+          right.job.updatedAt - left.job.updatedAt || right.index - left.index,
+      )
+      .slice(0, maxEntries)
+      .map(({ job }) => job.vaultPath),
+  );
+  return {
+    jobs: snapshot.jobs.filter(
+      (job) =>
+        job.state !== "trashed" || retainedCompletions.has(job.vaultPath),
+    ),
+    logs: snapshot.logs
+      .filter((entry) => entry.timestamp >= cutoff)
+      .sort((left, right) => left.timestamp - right.timestamp)
+      .slice(-maxEntries),
+  };
+}
+
 /** Commit mutations in order; failed saves never publish partially durable state. */
 export class JobStore {
   private data: JobSnapshot = { jobs: [], logs: [] };
@@ -310,6 +340,35 @@ export class JobStore {
     });
   }
 
+  /** Replace a proven removed completion only when the same Vault path exists again. */
+  resetTrashedGeneration(
+    path: string,
+    timestamp = this.now(),
+  ): Promise<JobRecord> {
+    if (!number(timestamp))
+      return Promise.reject(new Error("Invalid timestamp."));
+    return this.mutate((draft) => {
+      const normalized = this.path(path);
+      const index = draft.jobs.findIndex(
+        (candidate) => candidate.vaultPath === normalized,
+      );
+      if (index < 0 || draft.jobs[index]!.state !== "trashed")
+        throw new Error(
+          "Only a trashed completion can start a new generation.",
+        );
+      const fresh: JobRecord = {
+        vaultPath: normalized,
+        state: "queued",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        rewrittenNotePaths: [],
+        rewrittenReferenceCount: 0,
+      };
+      draft.jobs[index] = fresh;
+      return fresh;
+    });
+  }
+
   private logFailure(draft: JobSnapshot, job: JobRecord): void {
     if (!job.failure || !exits.includes(job.state)) return;
     draft.logs.push({
@@ -328,24 +387,7 @@ export class JobStore {
   }
 
   prune(): Promise<void> {
-    return this.mutate((draft) => {
-      const cutoff = this.now() - this.maxAgeDays * 86400000;
-      const retainedCompletions = new Set(
-        draft.jobs
-          .filter((job) => job.state === "trashed" && job.updatedAt >= cutoff)
-          .sort((a, b) => b.updatedAt - a.updatedAt)
-          .slice(0, this.maxEntries)
-          .map((job) => job.vaultPath),
-      );
-      draft.jobs = draft.jobs.filter(
-        (job) =>
-          job.state !== "trashed" || retainedCompletions.has(job.vaultPath),
-      );
-      draft.logs = draft.logs
-        .filter((entry) => entry.timestamp >= cutoff)
-        .sort((a, b) => a.timestamp - b.timestamp)
-        .slice(-this.maxEntries);
-    });
+    return this.mutate(() => {});
   }
 
   /** Clear only proven completions. Every record that may still map to a source remains. */
@@ -392,8 +434,14 @@ export class JobStore {
     return this.serialize(async () => {
       const draft = this.snapshot();
       const result = operation(draft);
-      await this.persistence.save(clone(draft));
-      this.data = clone(draft);
+      const retained = retainedSnapshot(
+        draft,
+        this.maxEntries,
+        this.maxAgeDays,
+        this.now(),
+      );
+      await this.persistence.save(clone(retained));
+      this.data = clone(retained);
       this.notify();
       return result === undefined ? result : clone(result);
     });

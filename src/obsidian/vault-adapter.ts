@@ -9,6 +9,7 @@ import type { SourcePort } from "../attachment-processor";
 import type { SourceFingerprint } from "../domain";
 import { normalizeVaultPath } from "../path-policy";
 import type { PicGoClient } from "../picgo-client";
+import type { ReferenceMutationProof } from "./reference-service";
 
 export interface SourceVault extends Pick<
   Vault,
@@ -67,7 +68,13 @@ export class ObsidianVaultAdapter implements SourcePort<TFile> {
       });
     return client.uploadOne(this.vault.adapter.getFullPath(file.path), signal);
   }
-  async trash(file: TFile, system: false): Promise<void> {
+  async trash(
+    file: TFile,
+    system: false,
+    proof: ReferenceMutationProof,
+  ): Promise<void> {
+    if (!proof.isValid())
+      throw new Error("The reference verification proof is stale.");
     if (this.get(file.path) !== file)
       throw new Error("The source identity changed.");
     await this.vault.trash(file, system);

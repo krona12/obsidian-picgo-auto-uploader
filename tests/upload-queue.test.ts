@@ -35,6 +35,37 @@ function store(jobs: JobRecord[] = []) {
 }
 
 describe("sequential upload queue", () => {
+  it("reserves a restored trashed path once and dispatches a clean generation", async () => {
+    const completed = record("attachments/a.png", "trashed", "safe");
+    const jobs = store([completed]);
+    await jobs.hydrate();
+    const seen: JobRecord[] = [];
+    const queue = new UploadQueue(
+      jobs,
+      async (current) => {
+        seen.push(current);
+        await jobs.transition(current.vaultPath, "skipped");
+      },
+      { now: () => 100 },
+    );
+    const results = await Promise.all([
+      queue.enqueueNewGeneration(completed.vaultPath),
+      queue.enqueueNewGeneration(completed.vaultPath),
+    ]);
+    await queue.drain();
+    expect(results).toContainEqual({ ok: true, value: "enqueued" });
+    expect(results).toContainEqual({ ok: true, value: "duplicate" });
+    expect(seen).toEqual([
+      {
+        vaultPath: completed.vaultPath,
+        state: "waiting-stable",
+        createdAt: 100,
+        updatedAt: expect.any(Number),
+        rewrittenNotePaths: [],
+        rewrittenReferenceCount: 0,
+      },
+    ]);
+  });
   // Break: paths are compared before normalization or two workers run concurrently.
   it("deduplicates normalized active paths and processes jobs strictly in order", async () => {
     const jobs = store();

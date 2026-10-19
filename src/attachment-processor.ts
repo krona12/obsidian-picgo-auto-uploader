@@ -15,6 +15,7 @@ import type {
   ReferenceDiscovery,
 } from "./reference-rewriter";
 import type {
+  ReferenceMutationProof,
   RewriteFailure,
   RewriteSummary,
 } from "./obsidian/reference-service";
@@ -26,7 +27,7 @@ export interface SourcePort<T> extends FileProbe {
     client: Pick<PicGoClient, "uploadOne">,
     signal: AbortSignal,
   ): ReturnType<PicGoClient["uploadOne"]>;
-  trash(file: T, system: false): Promise<void>;
+  trash(file: T, system: false, proof: ReferenceMutationProof): Promise<void>;
 }
 export interface ReferencePort<T> {
   discover(file: T): Promise<ReferenceDiscovery>;
@@ -38,6 +39,7 @@ export interface ReferencePort<T> {
     paths: readonly string[],
     signal?: AbortSignal,
   ): Promise<Result<void, ReferenceBlocker>>;
+  captureMutationProof(): ReferenceMutationProof;
   verifyNoLocalReferences(file: T): Promise<Result<void, ReferenceBlocker>>;
 }
 export interface TrashInput {
@@ -49,6 +51,7 @@ export interface TrashInput {
   currentFingerprint: SourceFingerprint | null;
   active: boolean;
   exactSourceExists: boolean;
+  referenceProofValid: boolean;
 }
 export function sameFingerprint(
   left: SourceFingerprint | null | undefined,
@@ -75,7 +78,8 @@ export function canTrash(input: TrashInput): boolean {
     input.blockers === 0 &&
     sameFingerprint(input.stableFingerprint, input.currentFingerprint) &&
     input.active &&
-    input.exactSourceExists
+    input.exactSourceExists &&
+    input.referenceProofValid
   );
 }
 export interface ProcessorDependencies<T> {
@@ -100,6 +104,7 @@ export class AttachmentProcessor<T> {
     let stage: ErrorStage = "path";
     let uploadInFlight = false;
     let refreshPaths: string[] = [];
+    let referenceProof: ReferenceMutationProof | undefined;
     const fail = async (
       code: string,
       retry: JobFailure["retry"] = "safe",
@@ -225,6 +230,7 @@ export class AttachmentProcessor<T> {
       );
       if (await cancelled()) return;
       if (!refreshed.ok) return await fail(refreshed.error.code);
+      referenceProof = references.captureMutationProof();
       const verified = await references.verifyNoLocalReferences(file);
       if (await cancelled()) return;
       if (!verified.ok) return await fail(verified.error.code);
@@ -241,6 +247,7 @@ export class AttachmentProcessor<T> {
           currentFingerprint: fingerprint,
           active: !signal.aborted,
           exactSourceExists: source.get(path) === file,
+          referenceProofValid: referenceProof.isValid(),
         })
       )
         return await fail(
@@ -249,7 +256,9 @@ export class AttachmentProcessor<T> {
           signal.aborted ? "cancelled" : "failed",
         );
       stage = "trash";
-      await source.trash(file, false);
+      // JavaScript cannot interleave a Vault event between this synchronous proof
+      // check and trash dispatch; the adapter asserts the same proof again.
+      await source.trash(file, false, referenceProof);
       await store.transition(path, "trashed");
     } catch {
       // Native exceptions may contain full paths or credentials. Never retain them.
@@ -267,6 +276,7 @@ export class AttachmentProcessor<T> {
         /* Persistence itself is unavailable; settle without another side effect. */
       }
     } finally {
+      referenceProof?.release();
       // A rewrite can install metadata listeners before cancellation or failure.
       // The reference service clears settled watches on its next fresh discovery.
       if (refreshPaths.length) {

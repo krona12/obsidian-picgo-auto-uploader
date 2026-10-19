@@ -175,11 +175,104 @@ describe("durable job store", () => {
     ]);
   });
 
+  it("enforces age and count retention during ordinary mutations", async () => {
+    const day = 86400000;
+    const tombstones = [
+      job("failed.png", "failed"),
+      job("uncertain.png", "uncertain"),
+      job("skipped.png", "skipped"),
+      job("cancelled.png", "cancelled"),
+    ];
+    const persistence = memory({
+      jobs: [
+        ...tombstones,
+        { ...job("old-complete.png", "trashed"), updatedAt: 0 },
+        { ...job("recent-complete.png", "trashed"), updatedAt: 40 * day },
+      ],
+      logs: [
+        {
+          timestamp: 0,
+          level: "info",
+          stage: "trash",
+          code: "old",
+          message: "Old.",
+        },
+        {
+          timestamp: 40 * day,
+          level: "warn",
+          stage: "lifecycle",
+          code: "recent",
+          message: "Recent.",
+        },
+      ],
+    });
+    const store = new JobStore(persistence, {
+      now: () => 40 * day,
+      historyMaxEntries: 1,
+      historyMaxAgeDays: 30,
+    });
+    await store.hydrate();
+    await store.appendLog({
+      timestamp: 40 * day + 1,
+      level: "info",
+      stage: "lifecycle",
+      code: "new",
+      message: "New.",
+    });
+    expect(store.snapshot().jobs).toEqual([
+      ...tombstones,
+      expect.objectContaining({ vaultPath: "recent-complete.png" }),
+    ]);
+    expect(store.snapshot().logs).toEqual([
+      expect.objectContaining({ code: "new" }),
+    ]);
+  });
+
+  it("does not publish retention pruning when the enclosing save fails", async () => {
+    const initial: JobSnapshot = {
+      jobs: [
+        job("failed.png", "failed"),
+        { ...job("old-complete.png", "trashed"), updatedAt: 0 },
+      ],
+      logs: [
+        {
+          timestamp: 0,
+          level: "info",
+          stage: "trash",
+          code: "old",
+          message: "Old.",
+        },
+      ],
+    };
+    const store = new JobStore(
+      {
+        async load() {
+          return initial;
+        },
+        async save() {
+          throw new Error("disk");
+        },
+      },
+      { now: () => 40 * 86400000, historyMaxEntries: 1 },
+    );
+    await store.hydrate();
+    await expect(
+      store.appendLog({
+        timestamp: 40 * 86400000,
+        level: "info",
+        stage: "lifecycle",
+        code: "new",
+        message: "New.",
+      }),
+    ).rejects.toThrow("disk");
+    expect(store.snapshot()).toEqual(initial);
+  });
+
   // Break: shared arrays/objects let a subscriber or adapter modify durable internal state.
   it("defensively clones writes, loads, subscribers, logs, and snapshots", async () => {
     const original = job();
     const persistence = memory();
-    const store = new JobStore(persistence);
+    const store = new JobStore(persistence, { now: () => 0 });
     store.subscribe((snapshot) => {
       snapshot.jobs[0]?.rewrittenNotePaths.push("attacker.md");
     });
@@ -468,6 +561,69 @@ describe("durable job store", () => {
     );
     expect(store.snapshot().jobs[0]).toEqual(original);
   });
+  it("resets only a proven trashed path as a fresh attachment generation", async () => {
+    const completed = {
+      ...job("attachments/a.png", "trashed"),
+      createdAt: 1,
+      updatedAt: 2,
+      fingerprint: { size: 4, mtime: 9 },
+      remoteUrl: "https://cdn.test/old.png",
+      rewrittenNotePaths: ["old.md"],
+      rewrittenReferenceCount: 3,
+      failure: {
+        code: "old",
+        stage: "trash" as const,
+        message: "Old generation.",
+        retry: "safe" as const,
+      },
+    };
+    const persistence = memory({ jobs: [completed], logs: [] });
+    const store = new JobStore(persistence);
+    await store.hydrate();
+    await store.resetTrashedGeneration(completed.vaultPath, 100);
+    expect(store.snapshot().jobs).toEqual([
+      {
+        vaultPath: completed.vaultPath,
+        state: "queued",
+        createdAt: 100,
+        updatedAt: 100,
+        rewrittenNotePaths: [],
+        rewrittenReferenceCount: 0,
+      },
+    ]);
+    expect(persistence.saved).toEqual(store.snapshot());
+  });
+  it.each(["failed", "uncertain", "skipped", "cancelled", "queued"] as const)(
+    "never resets a %s tombstone or active job as a new generation",
+    async (state) => {
+      const original = job("attachments/a.png", state);
+      const store = new JobStore(memory({ jobs: [original], logs: [] }));
+      await store.hydrate();
+      await expect(
+        store.resetTrashedGeneration(original.vaultPath, 100),
+      ).rejects.toThrow();
+      expect(store.snapshot().jobs).toEqual([original]);
+    },
+  );
+  it("rolls back a new-generation reset when persistence fails", async () => {
+    const original = {
+      ...job("attachments/a.png", "trashed"),
+      remoteUrl: "https://cdn.test/old.png",
+    };
+    const store = new JobStore({
+      async load() {
+        return { jobs: [original], logs: [] };
+      },
+      async save() {
+        throw new Error("disk");
+      },
+    });
+    await store.hydrate();
+    await expect(
+      store.resetTrashedGeneration(original.vaultPath, 100),
+    ).rejects.toThrow("disk");
+    expect(store.snapshot().jobs).toEqual([original]);
+  });
   it.each([
     ["skipped", "info"],
     ["failed", "error"],
@@ -631,7 +787,7 @@ describe("durable job store", () => {
         },
       ],
     });
-    const store = new JobStore(persistence);
+    const store = new JobStore(persistence, { now: () => 2 });
     await store.hydrate();
     await store.clearTerminalHistory();
     expect(store.snapshot()).toEqual({

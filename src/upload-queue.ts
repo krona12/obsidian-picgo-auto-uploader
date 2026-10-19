@@ -46,6 +46,11 @@ export class UploadQueue {
     return this.reserve(path);
   }
 
+  /** A caller that has observed a file at a previously trashed path starts a fresh job. */
+  enqueueNewGeneration(path: string): Promise<EnqueueResult> {
+    return this.reserve(path, undefined, false, true);
+  }
+
   /** Reserve identity before recovery so a scan cannot reset an active worker. */
   recover(path: string): Promise<EnqueueResult> {
     return this.reserve(path, undefined, true);
@@ -92,6 +97,7 @@ export class UploadQueue {
     path: string,
     retry?: { acknowledgeUncertain?: boolean },
     recover = false,
+    newGeneration = false,
   ): Promise<EnqueueResult> {
     const normalized = normalizeVaultPath(path);
     if (!normalized)
@@ -99,7 +105,12 @@ export class UploadQueue {
     if (this.entries.has(normalized))
       return Promise.resolve({ ok: true, value: "duplicate" });
     const previous = this.get(normalized);
-    if (!retry && previous && isTerminalState(previous.state))
+    if (
+      !retry &&
+      previous &&
+      isTerminalState(previous.state) &&
+      !(newGeneration && previous.state === "trashed")
+    )
       return Promise.resolve({ ok: true, value: "duplicate" });
     if (
       retry &&
@@ -127,7 +138,9 @@ export class UploadQueue {
     this.entries.set(normalized, entry);
     const initialize = async (): Promise<EnqueueResult> => {
       try {
-        if (recover && previous && previous.state !== "queued") {
+        if (newGeneration && previous?.state === "trashed")
+          await this.store.resetTrashedGeneration(normalized, this.now());
+        else if (recover && previous && previous.state !== "queued") {
           const recovered = await this.store.recoverInterrupted(normalized);
           if (isTerminalState(recovered.state))
             return { ok: true, value: "duplicate" };

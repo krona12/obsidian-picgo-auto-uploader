@@ -218,13 +218,18 @@ describe("PicGo protocol", () => {
       }),
     },
   ])(
-    "rejects $name as a safe explicit failure without retrying",
-    async ({ response }) => {
+    "rejects $name without accepting an ambiguous upload",
+    async ({ name, response }) => {
       const transport = new MemoryTransport(response);
       const result = await client(transport).uploadOne(sourcePath);
+      const explicitHttpRejection = name === "non-2xx" || name === "redirect";
       expect(result).toMatchObject({
         ok: false,
-        error: { state: "failed", retry: "safe", stage: "upload" },
+        error: {
+          state: explicitHttpRejection ? "failed" : "uncertain",
+          retry: explicitHttpRejection ? "safe" : "uncertain",
+          stage: "upload",
+        },
       });
       expect(transport.requests).toHaveLength(1);
     },
@@ -349,10 +354,24 @@ describe("PicGo protocol", () => {
     });
   });
 
-  it("requires a valid heartbeat response without treating it as an upload", async () => {
+  it("requires a valid heartbeat response without treating it as upload uncertainty", async () => {
     expect(
       await client(new MemoryTransport(reply({ success: false }))).heartbeat(),
-    ).toMatchObject({ ok: false });
+    ).toMatchObject({
+      ok: false,
+      error: { state: "failed", retry: "safe" },
+    });
+    expect(
+      await client(
+        new MemoryTransport({
+          ok: true,
+          value: { statusCode: 200, body: "not JSON" },
+        }),
+      ).heartbeat(),
+    ).toMatchObject({
+      ok: false,
+      error: { state: "failed", retry: "safe" },
+    });
     expect(
       await client(
         new MemoryTransport(reply({ success: true }, 503)),
@@ -496,7 +515,11 @@ describe("Node PicGo transport", () => {
       ).uploadOne(sourcePath),
     ).toMatchObject({
       ok: false,
-      error: { state: "failed", retry: "safe", code: "response-too-large" },
+      error: {
+        state: "uncertain",
+        retry: "uncertain",
+        code: "response-too-large",
+      },
     });
   });
 

@@ -19,9 +19,11 @@ function fixture() {
   const contents = new Map<string, string>();
   const caches = new Map<TFile, CachedMetadata | null>();
   const destinations = new Map<string, TFile>();
+  type MetadataEventName = "changed" | "deleted" | "resolve" | "resolved";
+  type MetadataEventCallback = (...args: unknown[]) => void;
   const handlers = new Map<
     EventRef,
-    (file: TFile, data: string, cache: CachedMetadata) => void
+    { name: MetadataEventName; callback: MetadataEventCallback }
   >();
   const failedReads = new Set<string>();
   const failedWrites = new Set<string>();
@@ -49,14 +51,21 @@ function fixture() {
       if (failAfterCommit) throw new Error("post-commit failure");
       return next;
     },
+    on() {
+      return {};
+    },
+    offref() {},
   };
   const metadata: ReferenceMetadata = {
     getFileCache: (file) => caches.get(file) ?? null,
     getFirstLinkpathDest: (link, source) =>
       destinations.get(`${source}:${link}`) ?? null,
-    on(_name, callback) {
+    on(name, callback) {
       const ref = {};
-      handlers.set(ref, callback);
+      handlers.set(ref, {
+        name,
+        callback: callback as unknown as MetadataEventCallback,
+      });
       return ref;
     },
     offref(ref) {
@@ -65,7 +74,8 @@ function fixture() {
   };
   function emit(file: TFile, data: string, cache: CachedMetadata) {
     caches.set(file, cache);
-    for (const callback of handlers.values()) callback(file, data, cache);
+    for (const handler of handlers.values())
+      if (handler.name === "changed") handler.callback(file, data, cache);
   }
   function add(path: string, text = "", embeds: EmbedCache[] = []): TFile {
     const name = path.split("/").at(-1)!;
