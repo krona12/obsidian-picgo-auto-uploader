@@ -12,6 +12,7 @@ export default tseslint.config(
       ".release-stage-*/**",
       ".release-backup-*/**",
       "coverage/**",
+      ".worktrees/**",
       ".superpowers/**",
     ],
   },
