@@ -13,7 +13,7 @@ The plugin watches configured attachment folders, waits for each file to stop ch
 - A working PicGo uploader/provider configuration.
 - A backup or file-history system. Start with a small test folder before enabling the plugin across an important Vault.
 
-The PicGo `/heartbeat` endpoint is used only by **Test connection**. Each actual upload sends one image per request to `/upload`; a successful heartbeat does not guarantee that a later upload will succeed.
+The PicGo `POST /heartbeat` endpoint is used only by **Test connection**. Each actual upload sends one image per `POST /upload` request; a successful heartbeat does not guarantee that a later upload will succeed.
 
 ## How it works
 
@@ -72,7 +72,7 @@ Plain HTTP is safe from passive network observers only when it stays on the loca
 
 ## Settings and status center
 
-Open **Settings → Community plugins → PicGo Auto Uploader** to configure automation, PicGo address/secret, folders, extensions, size limit, timing, and history retention. Invalid settings are not activated. **Test connection** calls only `/heartbeat`.
+Open **Settings → Community plugins → PicGo Auto Uploader** to configure automation, PicGo address/secret, folders, extensions, size limit, timing, and history retention. Invalid settings are not activated. **Test connection** calls only `POST /heartbeat`.
 
 Use the ribbon icon, status bar, or command palette to open the non-persistent status center. It shows PicGo reachability, automation state, queue/history, last scan, last successful conversion, redacted failures, and safe actions. It can scan now, retry safe failures, require confirmation for uncertain retries, cancel pending work, clear completed history, and export redacted diagnostics.
 

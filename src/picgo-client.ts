@@ -360,7 +360,7 @@ export class PicGoClient {
       result = await this.transport.request(
         {
           url: `${settings.picgoOrigin}/${endpoint}`,
-          method: endpoint === "upload" ? "POST" : "GET",
+          method: "POST",
           headers,
           timeoutMs: settings.requestTimeoutMs,
           ...(endpoint === "upload"

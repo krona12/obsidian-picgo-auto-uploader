@@ -51,7 +51,7 @@ describe("PicGo protocol", () => {
     expect(transport.requests).toEqual([
       {
         url: "http://127.0.0.1:36677/heartbeat",
-        method: "GET",
+        method: "POST",
         headers: {},
         timeoutMs: 30000,
       },
