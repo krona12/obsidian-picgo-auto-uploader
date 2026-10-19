@@ -94,14 +94,18 @@ describe("sequential upload queue", () => {
     expect(order).toEqual(["attachments/a.png", "attachments/b.png"]);
   });
 
-  // Break: checking capacity asynchronously lets simultaneous events exceed the 1,000 path cap.
-  it("explicitly rejects overflow at the default bound, including reservations", async () => {
+  // Break: checking capacity asynchronously lets simultaneous events exceed the configured cap.
+  it("explicitly rejects overflow at the configured bound, including reservations", async () => {
     const jobs = store();
     const release = deferred();
-    const queue = new UploadQueue(jobs, async () => {
-      await release.promise;
-    });
-    const accepted = Array.from({ length: 1000 }, (_, index) =>
+    const queue = new UploadQueue(
+      jobs,
+      async () => {
+        await release.promise;
+      },
+      { maxPending: 10 },
+    );
+    const accepted = Array.from({ length: 10 }, (_, index) =>
       queue.enqueue(`a${index}.png`),
     );
     expect(await queue.enqueue("overflow.png")).toMatchObject({
@@ -116,7 +120,7 @@ describe("sequential upload queue", () => {
     release.resolve();
     await queue.cancelPending();
     await queue.drain();
-  }, 15000);
+  });
 
   // Break: cancellation starts waiting jobs or overwrites post-dispatch uncertainty.
   it("cancels pending jobs and lets active upload uncertainty take precedence", async () => {
