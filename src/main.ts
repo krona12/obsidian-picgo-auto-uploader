@@ -151,56 +151,87 @@ export default class PicGoAutoUploaderPlugin extends Plugin {
   private locale: SupportedLocale = "en";
   private rebuildTail: Promise<void> = Promise.resolve();
   private shutdownPromise: Promise<void> | undefined;
+  private loadBarrier: Promise<void> = Promise.resolve();
   private unloading = false;
   private lifecycleGeneration = 0;
 
   async onload(): Promise<void> {
+    if (this.shutdownPromise) return;
     this.unloading = false;
-    this.lifecycleGeneration++;
-    this.locale = resolveLocale(moment.locale());
-    this.repository = new PluginDataRepository(
-      () => this.loadData(),
-      (value) => this.saveData(value),
-    );
-    await this.repository.initialize();
-    this.runtime = await this.buildRuntime(this.repository.settings());
+    const generation = ++this.lifecycleGeneration;
+    let releaseLoad!: () => void;
+    this.loadBarrier = new Promise<void>((resolve) => {
+      releaseLoad = resolve;
+    });
+    let candidate: Runtime | undefined;
+    let started = false;
+    try {
+      this.locale = resolveLocale(moment.locale());
+      this.repository = new PluginDataRepository(
+        () => this.loadData(),
+        (value) => this.saveData(value),
+      );
+      await this.repository.initialize();
+      if (!this.isActive(generation)) return;
+      candidate = await this.buildRuntime(this.repository.settings());
+      if (!this.isActive(generation)) return;
 
-    const statusElement = this.addStatusBarItem();
-    this.statusPresenter = new StatusBarPresenter(
-      statusElement,
-      this.statusBarActions(),
-      this.locale,
-    );
-    this.settingsTab = new PicGoAutoUploaderSettingTab(
-      this.app,
-      this,
-      this.settingsActions(),
-      this.locale,
-    );
-    this.addSettingTab(this.settingsTab);
-    this.addRibbonIcon("image-up", t(this.locale, "statusbar.open"), () =>
-      this.openStatus(),
-    );
-    this.addCommand({
-      id: "open-status",
-      name: "Open PicGo Auto Uploader status",
-      callback: () => this.openStatus(),
-    });
-    this.addCommand({
-      id: "scan-now",
-      name: "Scan attachment folders now",
-      callback: () =>
-        void this.safeAction(() => this.current().controller.scanNow()),
-    });
-    this.addCommand({
-      id: "retry-failed",
-      name: "Retry failed uploads",
-      callback: () =>
-        void this.safeAction(() =>
-          this.current().controller.retrySafeFailures(),
-        ),
-    });
-    this.runtime.controller.start();
+      this.runtime = candidate;
+      if (!this.isActive(generation)) return;
+      const statusElement = this.addStatusBarItem();
+      this.statusPresenter = new StatusBarPresenter(
+        statusElement,
+        this.statusBarActions(),
+        this.locale,
+      );
+      if (!this.isActive(generation)) return;
+      this.settingsTab = new PicGoAutoUploaderSettingTab(
+        this.app,
+        this,
+        this.settingsActions(),
+        this.locale,
+      );
+      this.addSettingTab(this.settingsTab);
+      if (!this.isActive(generation)) return;
+      this.addRibbonIcon("image-up", t(this.locale, "statusbar.open"), () =>
+        this.openStatus(),
+      );
+      if (!this.isActive(generation)) return;
+      this.addCommand({
+        id: "open-status",
+        name: "Open PicGo Auto Uploader status",
+        callback: () => this.openStatus(),
+      });
+      if (!this.isActive(generation)) return;
+      this.addCommand({
+        id: "scan-now",
+        name: "Scan attachment folders now",
+        callback: () =>
+          void this.safeAction(() => this.current().controller.scanNow()),
+      });
+      if (!this.isActive(generation)) return;
+      this.addCommand({
+        id: "retry-failed",
+        name: "Retry failed uploads",
+        callback: () =>
+          void this.safeAction(() =>
+            this.current().controller.retrySafeFailures(),
+          ),
+      });
+      if (!this.isActive(generation)) return;
+      candidate.controller.start();
+      started = true;
+    } finally {
+      if (!started && candidate) {
+        if (this.runtime === candidate) this.runtime = undefined;
+        try {
+          await candidate.controller.stop();
+        } catch {
+          /* An invalidated initial runtime must remain stopped. */
+        }
+      }
+      releaseLoad();
+    }
   }
 
   onunload(): void {
@@ -218,6 +249,7 @@ export default class PicGoAutoUploaderPlugin extends Plugin {
     this.statusPresenter = undefined;
     const runtime = this.runtime;
     this.runtime = undefined;
+    const loading = this.loadBarrier;
     const rebuilds = this.rebuildTail;
     this.shutdownPromise = (async () => {
       try {
@@ -225,6 +257,7 @@ export default class PicGoAutoUploaderPlugin extends Plugin {
       } catch {
         /* Continue to invalidate and drain queued rebuild work. */
       }
+      await loading;
       try {
         await rebuilds;
       } catch {

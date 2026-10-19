@@ -110,6 +110,79 @@ describe("plugin diagnostics", () => {
 });
 
 describe("plugin entry point", () => {
+  it("waits for blocked repository initialization and registers nothing after shutdown", async () => {
+    const app = pluginApp();
+    const plugin = pluginFor(app);
+    let release!: (value: unknown) => void;
+    const blocked = new Promise<unknown>((resolve) => {
+      release = resolve;
+    });
+    const load = vi.spyOn(plugin, "loadData").mockReturnValue(blocked);
+    const loading = plugin.onload();
+    await vi.waitFor(() => expect(load).toHaveBeenCalledOnce());
+    let shutdownFinished = false;
+    const shuttingDown = plugin.shutdown().then(() => {
+      shutdownFinished = true;
+    });
+    await Promise.resolve();
+    expect(shutdownFinished).toBe(false);
+    release(null);
+    await Promise.all([loading, shuttingDown]);
+    const registration = plugin as unknown as {
+      commands: unknown[];
+      ribbons: unknown[];
+      settingTabs: unknown[];
+      statusItems: unknown[];
+    };
+    expect(plugin.runtimeIdentity()).toBeUndefined();
+    expect(registration.commands).toHaveLength(0);
+    expect(registration.ribbons).toHaveLength(0);
+    expect(registration.settingTabs).toHaveLength(0);
+    expect(registration.statusItems).toHaveLength(0);
+    expect(app.workspace.onLayoutReady).not.toHaveBeenCalled();
+  });
+
+  it("waits for blocked initial runtime construction and discards it before registration", async () => {
+    const app = pluginApp();
+    const plugin = pluginFor(app);
+    const internal = plugin as unknown as {
+      buildRuntime(settings: PluginSettings): Promise<unknown>;
+    };
+    const original = internal.buildRuntime.bind(plugin);
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const build = vi
+      .spyOn(internal, "buildRuntime")
+      .mockImplementation(async (settings) => {
+        await blocked;
+        return original(settings);
+      });
+    const loading = plugin.onload();
+    await vi.waitFor(() => expect(build).toHaveBeenCalledOnce());
+    let shutdownFinished = false;
+    const shuttingDown = plugin.shutdown().then(() => {
+      shutdownFinished = true;
+    });
+    await Promise.resolve();
+    expect(shutdownFinished).toBe(false);
+    release();
+    await Promise.all([loading, shuttingDown]);
+    const registration = plugin as unknown as {
+      commands: unknown[];
+      ribbons: unknown[];
+      settingTabs: unknown[];
+      statusItems: unknown[];
+    };
+    expect(plugin.runtimeIdentity()).toBeUndefined();
+    expect(registration.commands).toHaveLength(0);
+    expect(registration.ribbons).toHaveLength(0);
+    expect(registration.settingTabs).toHaveLength(0);
+    expect(registration.statusItems).toHaveLength(0);
+    expect(app.workspace.onLayoutReady).not.toHaveBeenCalled();
+  });
+
   it("loads data once and registers only the native surface contract", async () => {
     const ready: Array<() => void> = [];
     const app = {
