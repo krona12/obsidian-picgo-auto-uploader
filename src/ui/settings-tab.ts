@@ -165,6 +165,7 @@ export class PicGoAutoUploaderSettingTab extends PluginSettingTab {
   private errors: SettingsDraftErrors = {};
   private connection: AbortController | undefined;
   private visible = false;
+  private warningRegion: HTMLElement | undefined;
 
   constructor(
     app: App,
@@ -212,28 +213,10 @@ export class PicGoAutoUploaderSettingTab extends PluginSettingTab {
     this.text("historyMaxEntries", "settings.historyEntries");
     this.text("historyMaxAgeDays", "settings.historyDays");
 
-    if (insecureHttp(values.picgoOrigin)) {
-      const warning = document.createElement("section");
-      warning.className = "picgo-auto-uploader-http-warning";
-      warning.dataset.warning = "insecure-http";
-      warning.setAttribute("role", "alert");
-      const text = document.createElement("p");
-      text.textContent = t(this.locale, "settings.insecureWarning");
-      const label = document.createElement("label");
-      const checkbox = document.createElement("input");
-      checkbox.type = "checkbox";
-      checkbox.dataset.field = "allowInsecureHttp";
-      checkbox.checked = values.allowInsecureHttp;
-      checkbox.addEventListener("change", () => {
-        values.allowInsecureHttp = checkbox.checked;
-      });
-      label.append(
-        checkbox,
-        document.createTextNode(t(this.locale, "settings.insecureAck")),
-      );
-      warning.append(text, label);
-      this.containerEl.append(warning);
-    }
+    this.warningRegion = document.createElement("div");
+    this.warningRegion.dataset.region = "insecure-http";
+    this.containerEl.append(this.warningRegion);
+    this.renderInsecureWarning();
 
     const actions = document.createElement("div");
     actions.className = "picgo-auto-uploader-actions";
@@ -280,7 +263,7 @@ export class PicGoAutoUploaderSettingTab extends PluginSettingTab {
         if (field === "picgoOrigin") {
           this.values!.allowInsecureHttp = false;
           this.values![field] = value as never;
-          this.display();
+          this.renderInsecureWarning();
           return;
         }
         this.values![field] = value as never;
@@ -377,6 +360,33 @@ export class PicGoAutoUploaderSettingTab extends PluginSettingTab {
     error.className = "picgo-auto-uploader-field-error";
     error.textContent = t(this.locale, "settings.validation");
     parent.append(error);
+  }
+
+  private renderInsecureWarning(): void {
+    const region = this.warningRegion;
+    if (!region || !this.values) return;
+    region.replaceChildren();
+    if (!insecureHttp(this.values.picgoOrigin)) return;
+    const warning = document.createElement("section");
+    warning.className = "picgo-auto-uploader-http-warning";
+    warning.dataset.warning = "insecure-http";
+    warning.setAttribute("role", "alert");
+    const text = document.createElement("p");
+    text.textContent = t(this.locale, "settings.insecureWarning");
+    const label = document.createElement("label");
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.dataset.field = "allowInsecureHttp";
+    checkbox.checked = this.values.allowInsecureHttp;
+    checkbox.addEventListener("change", () => {
+      this.values!.allowInsecureHttp = checkbox.checked;
+    });
+    label.append(
+      checkbox,
+      document.createTextNode(t(this.locale, "settings.insecureAck")),
+    );
+    warning.append(text, label);
+    region.append(warning);
   }
 
   private async apply(): Promise<void> {

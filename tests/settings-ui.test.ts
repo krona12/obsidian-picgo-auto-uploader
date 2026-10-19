@@ -70,6 +70,7 @@ describe("settings UI", () => {
       "en",
     );
     tab.display();
+    document.body.append(tab.containerEl);
     const origin = tab.containerEl.querySelector<HTMLInputElement>(
       'input[data-field="picgoOrigin"]',
     )!;
@@ -93,6 +94,72 @@ describe("settings UI", () => {
       .click();
     await Promise.resolve();
     expect(applySettings).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the endpoint input mounted and focused during sequential typing", () => {
+    const tab = new PicGoAutoUploaderSettingTab(
+      {} as never,
+      {} as never,
+      actions(),
+      "en",
+    );
+    tab.display();
+    document.body.append(tab.containerEl);
+    const origin = tab.containerEl.querySelector<HTMLInputElement>(
+      'input[data-field="picgoOrigin"]',
+    )!;
+    origin.focus();
+    for (const value of [
+      "http://1",
+      "http://192.168",
+      "http://192.168.1.20:36677",
+    ]) {
+      origin.value = value;
+      origin.dispatchEvent(new Event("input"));
+      expect(
+        tab.containerEl.querySelector('input[data-field="picgoOrigin"]'),
+      ).toBe(origin);
+      expect(document.activeElement).toBe(origin);
+    }
+    expect(
+      tab.containerEl.querySelector('[data-warning="insecure-http"]'),
+    ).not.toBeNull();
+  });
+
+  it("updates the warning region in place and clears acknowledgement on every endpoint edit", () => {
+    const tab = new PicGoAutoUploaderSettingTab(
+      {} as never,
+      {} as never,
+      actions(),
+      "en",
+    );
+    tab.display();
+    const region = tab.containerEl.querySelector<HTMLElement>(
+      '[data-region="insecure-http"]',
+    )!;
+    const origin = tab.containerEl.querySelector<HTMLInputElement>(
+      'input[data-field="picgoOrigin"]',
+    )!;
+    origin.value = "http://192.168.1.20:36677";
+    origin.dispatchEvent(new Event("input"));
+    const acknowledgement = region.querySelector<HTMLInputElement>(
+      'input[data-field="allowInsecureHttp"]',
+    )!;
+    acknowledgement.checked = true;
+    acknowledgement.dispatchEvent(new Event("change"));
+    origin.value = "http://192.168.1.20:36678";
+    origin.dispatchEvent(new Event("input"));
+    expect(tab.containerEl.querySelector('[data-region="insecure-http"]')).toBe(
+      region,
+    );
+    expect(
+      region.querySelector<HTMLInputElement>(
+        'input[data-field="allowInsecureHttp"]',
+      )!.checked,
+    ).toBe(false);
+    origin.value = "http://127.0.0.1:36677";
+    origin.dispatchEvent(new Event("input"));
+    expect(region.childElementCount).toBe(0);
   });
 
   it("aborts an in-flight connection check and clears DOM when hidden", () => {

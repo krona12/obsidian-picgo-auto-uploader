@@ -101,8 +101,8 @@ describe("durable job store", () => {
     });
   });
 
-  // Break: pruning old resumable/active jobs, or retaining more than the terminal count/age limit.
-  it("prunes only terminal history using injected age and count limits", async () => {
+  // Break: pruning source tombstones, or retaining more than the completion count/age limit.
+  it("prunes only completed history using injected age and count limits", async () => {
     const day = 86400000;
     const initial = {
       jobs: [
@@ -124,7 +124,54 @@ describe("durable job store", () => {
     expect(store.snapshot().jobs.map((item) => item.vaultPath)).toEqual([
       "active.png",
       "resume.png",
+      "old.png",
+      "recent.png",
       "newest.png",
+    ]);
+  });
+
+  it("applies retention only to trashed completions and never expires source tombstones", async () => {
+    const day = 86400000;
+    const failure = (retry: "safe" | "uncertain" | "non-retryable") => ({
+      code: "retained",
+      stage: "upload" as const,
+      message: "Safe message.",
+      retry,
+    });
+    const tombstones: JobRecord[] = [
+      { ...job("failed.png", "failed"), failure: failure("safe") },
+      { ...job("skipped.png", "skipped"), failure: failure("non-retryable") },
+      { ...job("uncertain.png", "uncertain"), failure: failure("uncertain") },
+      { ...job("cancelled.png", "cancelled"), failure: failure("safe") },
+    ];
+    const completions = [
+      {
+        ...job("old-complete.png", "trashed"),
+        updatedAt: 1,
+        remoteUrl: "https://cdn.test/old.png",
+      },
+      {
+        ...job("recent-complete.png", "trashed"),
+        updatedAt: 40 * day,
+        remoteUrl: "https://cdn.test/recent.png",
+      },
+    ];
+    const store = new JobStore(
+      memory({ jobs: [...tombstones, ...completions], logs: [] }),
+      {
+        now: () => 40 * day,
+        historyMaxEntries: 1,
+        historyMaxAgeDays: 30,
+      },
+    );
+    await store.hydrate();
+    await store.prune();
+    expect(store.snapshot().jobs.map((item) => item.vaultPath)).toEqual([
+      "failed.png",
+      "skipped.png",
+      "uncertain.png",
+      "cancelled.png",
+      "recent-complete.png",
     ]);
   });
 

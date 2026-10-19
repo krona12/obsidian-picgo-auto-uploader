@@ -151,8 +151,12 @@ export default class PicGoAutoUploaderPlugin extends Plugin {
   private locale: SupportedLocale = "en";
   private rebuildTail: Promise<void> = Promise.resolve();
   private shutdownPromise: Promise<void> | undefined;
+  private unloading = false;
+  private lifecycleGeneration = 0;
 
   async onload(): Promise<void> {
+    this.unloading = false;
+    this.lifecycleGeneration++;
     this.locale = resolveLocale(moment.locale());
     this.repository = new PluginDataRepository(
       () => this.loadData(),
@@ -205,6 +209,8 @@ export default class PicGoAutoUploaderPlugin extends Plugin {
 
   shutdown(): Promise<void> {
     if (this.shutdownPromise) return this.shutdownPromise;
+    this.unloading = true;
+    this.lifecycleGeneration++;
     this.statusModal?.close();
     this.statusModal = undefined;
     this.settingsTab?.hide();
@@ -212,28 +218,88 @@ export default class PicGoAutoUploaderPlugin extends Plugin {
     this.statusPresenter = undefined;
     const runtime = this.runtime;
     this.runtime = undefined;
-    this.shutdownPromise = (
-      runtime?.controller.stop() ?? Promise.resolve()
-    ).finally(() => {
-      this.shutdownPromise = undefined;
-    });
+    const rebuilds = this.rebuildTail;
+    this.shutdownPromise = (async () => {
+      try {
+        await runtime?.controller.stop();
+      } catch {
+        /* Continue to invalidate and drain queued rebuild work. */
+      }
+      try {
+        await rebuilds;
+      } catch {
+        /* An invalidated or rolled-back settings operation settles safely. */
+      }
+      const late = this.runtime;
+      this.runtime = undefined;
+      if (late && late !== runtime) {
+        try {
+          await late.controller.stop();
+        } catch {
+          /* Shutdown remains fail-closed. */
+        }
+      }
+    })();
     return this.shutdownPromise;
   }
 
   applySettings(settings: PluginSettings): Promise<void> {
+    if (this.unloading)
+      return Promise.reject(new Error("Settings could not be applied."));
     const operation = async () => {
       const validation = validateSettings(settings);
       if (!validation.ok || !this.repository)
         throw new Error("Invalid settings.");
-      await this.repository.saveSettings(validation.value);
+      const generation = this.lifecycleGeneration;
+      this.assertActive(generation);
       const old = this.current();
-      this.statusModal?.close();
-      this.statusModal = undefined;
-      await old.controller.stop();
-      const replacement = await this.buildRuntime(validation.value);
-      this.runtime = replacement;
-      this.statusPresenter?.bind(this.statusBarActions());
-      replacement.controller.start();
+      const previousSettings = clone(old.settings);
+      let settingsPersisted = false;
+      let oldStopped = false;
+      let replacement: Runtime | undefined;
+      try {
+        await this.repository.saveSettings(validation.value);
+        settingsPersisted = true;
+        this.assertActive(generation);
+        this.statusModal?.close();
+        this.statusModal = undefined;
+        await old.controller.stop();
+        oldStopped = true;
+        this.assertActive(generation);
+        replacement = await this.buildRuntime(validation.value);
+        this.assertActive(generation);
+        this.runtime = replacement;
+        this.statusPresenter?.bind(this.statusBarActions());
+        this.assertActive(generation);
+        replacement.controller.start();
+      } catch {
+        if (replacement) {
+          try {
+            await replacement.controller.stop();
+          } catch {
+            /* A replacement is never allowed to survive a failed transaction. */
+          }
+        }
+        let rolledBack = !settingsPersisted;
+        if (settingsPersisted) {
+          try {
+            await this.repository.saveSettings(previousSettings);
+            rolledBack = true;
+          } catch {
+            rolledBack = false;
+          }
+        }
+        if (!rolledBack) {
+          if (this.runtime === old) this.runtime = undefined;
+          throw new Error("Settings could not be applied.");
+        }
+        if (oldStopped && this.isActive(generation)) {
+          this.runtime = old;
+          this.statusPresenter?.bind(this.statusBarActions());
+          old.controller.start();
+        }
+        throw new Error("Settings could not be applied.");
+      }
     };
     const result = this.rebuildTail.then(operation, operation);
     this.rebuildTail = result.then(
@@ -373,6 +439,15 @@ export default class PicGoAutoUploaderPlugin extends Plugin {
   private current(): Runtime {
     if (!this.runtime) throw new Error("Plugin is not running.");
     return this.runtime;
+  }
+
+  private isActive(generation: number): boolean {
+    return !this.unloading && generation === this.lifecycleGeneration;
+  }
+
+  private assertActive(generation: number): void {
+    if (!this.isActive(generation))
+      throw new Error("Settings could not be applied.");
   }
 
   private async safeAction(operation: () => Promise<unknown>): Promise<void> {

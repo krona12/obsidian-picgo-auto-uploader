@@ -330,23 +330,16 @@ export class JobStore {
   prune(): Promise<void> {
     return this.mutate((draft) => {
       const cutoff = this.now() - this.maxAgeDays * 86400000;
-      const retained = new Set(
+      const retainedCompletions = new Set(
         draft.jobs
-          .filter(
-            (job) =>
-              isTerminalState(job.state) &&
-              !job.remoteUrl &&
-              job.updatedAt >= cutoff,
-          )
+          .filter((job) => job.state === "trashed" && job.updatedAt >= cutoff)
           .sort((a, b) => b.updatedAt - a.updatedAt)
           .slice(0, this.maxEntries)
           .map((job) => job.vaultPath),
       );
       draft.jobs = draft.jobs.filter(
         (job) =>
-          !isTerminalState(job.state) ||
-          Boolean(job.remoteUrl) ||
-          retained.has(job.vaultPath),
+          job.state !== "trashed" || retainedCompletions.has(job.vaultPath),
       );
       draft.logs = draft.logs
         .filter((entry) => entry.timestamp >= cutoff)

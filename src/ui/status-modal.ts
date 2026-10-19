@@ -33,6 +33,61 @@ const pendingStates = new Set<JobState>([
   "verifying",
 ]);
 
+const failureCopy = new Map<string, Parameters<typeof t>[1]>([
+  ["aborted", "failure.cancelled"],
+  ["ineligible-path", "failure.path"],
+  ["invalid-path", "failure.path"],
+  ["source-unavailable", "failure.path"],
+  ["file-missing", "failure.path"],
+  ["source-changed", "failure.path"],
+  ["invalid-target", "failure.path"],
+  ["file-too-large", "failure.tooLarge"],
+  ["invalid-stat", "failure.stability"],
+  ["invalid-options", "failure.stability"],
+  ["stability-timeout", "failure.stability"],
+  ["orphan", "failure.orphan"],
+  ["discovery-blocked", "failure.reference"],
+  ["discovery-failed", "failure.reference"],
+  ["missing-cache", "failure.reference"],
+  ["unresolved-destination", "failure.reference"],
+  ["unsupported-dependency", "failure.reference"],
+  ["unsupported-syntax", "failure.reference"],
+  ["metadata-mismatch", "failure.reference"],
+  ["unsafe-markdown-context", "failure.reference"],
+  ["note-missing", "failure.reference"],
+  ["read-failed", "failure.reference"],
+  ["http-failure", "failure.upload"],
+  ["invalid-response", "failure.upload"],
+  ["picgo-failure", "failure.upload"],
+  ["invalid-result", "failure.upload"],
+  ["invalid-items", "failure.upload"],
+  ["invalid-settings", "failure.upload"],
+  ["transport-failure", "failure.upload"],
+  ["invalid-request", "failure.upload"],
+  ["response-too-large", "failure.upload"],
+  ["connection-refused", "failure.upload"],
+  ["timeout", "failure.upload"],
+  ["disconnected", "failure.upload"],
+  ["invalid-saved-url", "failure.upload"],
+  ["interrupted-upload", "failure.upload"],
+  ["worker-uncertain", "failure.upload"],
+  ["invalid-remote-url", "failure.rewrite"],
+  ["mixed-notes", "failure.rewrite"],
+  ["overlapping-edits", "failure.rewrite"],
+  ["stale-offsets", "failure.rewrite"],
+  ["process-failed", "failure.rewrite"],
+  ["metadata-refresh-timeout", "failure.verify"],
+  ["refresh-superseded", "failure.verify"],
+  ["refresh-untracked", "failure.verify"],
+  ["local-references-remain", "failure.verify"],
+  ["worker-failed", "failure.lifecycle"],
+  ["worker-incomplete", "failure.lifecycle"],
+  ["persistence-failure", "failure.lifecycle"],
+  ["queue-full", "failure.lifecycle"],
+  ["not-retryable", "failure.lifecycle"],
+  ["operation-failed", "failure.generic"],
+]);
+
 export class StatusModal extends Modal {
   private readonly locale: SupportedLocale;
   private snapshotValue: ControllerSnapshot;
@@ -220,7 +275,8 @@ export class StatusModal extends Modal {
       row.append(name, status, details);
       if (job.failure) {
         const failure = document.createElement("span");
-        failure.textContent = `${t(this.locale, `stage.${job.failure.stage}` as Parameters<typeof t>[1])}: ${job.failure.code}`;
+        const copy = failureCopy.get(job.failure.code) ?? "failure.generic";
+        failure.textContent = `${t(this.locale, `stage.${job.failure.stage}` as Parameters<typeof t>[1])}: ${t(this.locale, copy)}`;
         row.append(failure);
         if (job.failure.retry === "safe" && job.state !== "uncertain")
           this.jobAction(row, "retry", job.vaultPath, "common.retry", () =>

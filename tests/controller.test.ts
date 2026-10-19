@@ -383,6 +383,33 @@ describe("restart recovery and resilient shutdown", () => {
       await f.controller.stop();
     },
   );
+  it("keeps an expired uncertain tombstone through restart reconciliation until acknowledged", async () => {
+    const uncertain = interrupted("uncertain", {
+      updatedAt: 0,
+      failure: {
+        code: "timeout",
+        stage: "upload",
+        message: "Safe message.",
+        retry: "uncertain",
+      },
+    });
+    const f = setup(true, uncertain);
+    await f.store.hydrate();
+    await f.store.prune();
+    f.controller.start();
+    f.ready();
+    await f.controller.scanNow();
+    await f.queue.drain();
+    expect(f.job()).toMatchObject({
+      state: "uncertain",
+      failure: { retry: "uncertain" },
+    });
+    expect(f.uploads()).toBe(0);
+    await f.controller.retry(f.source.path, { acknowledgeUncertain: true });
+    await f.queue.drain();
+    expect(f.uploads()).toBe(1);
+    await f.controller.stop();
+  });
   it("does not reset an actively owned upload during reconciliation", async () => {
     const f = setup();
     f.blockUpload();

@@ -102,6 +102,46 @@ describe("status UI", () => {
     });
   });
 
+  it.each([
+    ["en", "The operation could not be completed safely."],
+    ["zh-CN", "操作未能安全完成。"],
+  ])(
+    "renders generic localized copy for unsafe unknown failure codes in %s",
+    (locale, expected) => {
+      const sentinel = "Authorization: Bearer secret C:\\private\\photo.png";
+      const snapshot: ControllerSnapshot = Object.freeze({
+        ...empty,
+        counts: { failed: 1 },
+        jobs: [
+          Object.freeze({
+            vaultPath: "attachments/private.png",
+            state: "failed",
+            createdAt: 1,
+            updatedAt: 2,
+            rewrittenNotePaths: [],
+            rewrittenReferenceCount: 0,
+            failure: Object.freeze({
+              code: sentinel,
+              stage: "upload",
+              message: sentinel,
+              retry: "safe",
+            }),
+          }),
+        ],
+      });
+      const modal = new StatusModal(
+        {} as never,
+        actions({ snapshot: () => snapshot }),
+        locale,
+      );
+      modal.open();
+      expect(modal.contentEl.textContent).toContain(expected);
+      expect(modal.contentEl.textContent).not.toContain("Authorization");
+      expect(modal.contentEl.textContent).not.toContain("C:\\private");
+      modal.close();
+    },
+  );
+
   it("aborts heartbeat and unsubscribes on close", () => {
     let signal: AbortSignal | undefined;
     const unsubscribe = vi.fn();
