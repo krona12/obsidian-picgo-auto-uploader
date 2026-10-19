@@ -1,5 +1,10 @@
 import { DEFAULT_SETTINGS } from "./defaults";
-import type { JobRecord, JobState, LogEntry } from "./domain";
+import type {
+  JobRecord,
+  JobState,
+  LogEntry,
+  SourceFingerprint,
+} from "./domain";
 import { normalizeVaultPath } from "./path-policy";
 
 export interface JobSnapshot {
@@ -23,6 +28,7 @@ export type JobPatch = Partial<
     JobRecord,
     | "fingerprint"
     | "remoteUrl"
+    | "pendingSnapshotId"
     | "rewrittenNotePaths"
     | "rewrittenReferenceCount"
     | "failure"
@@ -35,7 +41,8 @@ const forward: Partial<Record<JobState, JobState>> = {
   "discovering-references": "uploading",
   uploading: "rewriting",
   rewriting: "verifying",
-  verifying: "trashed",
+  verifying: "deleting",
+  deleting: "trashed",
 };
 const exits: JobState[] = ["skipped", "failed", "uncertain", "cancelled"];
 const states: JobState[] = [
@@ -84,15 +91,24 @@ function validJob(value: unknown): value is JobRecord {
     (value.rewrittenReferenceCount as number) >= 0 &&
     (value.remoteUrl === undefined ||
       (typeof value.remoteUrl === "string" && value.remoteUrl.length > 0)) &&
+    (value.pendingSnapshotId === undefined ||
+      (typeof value.pendingSnapshotId === "string" &&
+        /^obsidian-picgo-\d+-[0-9a-f-]+$/i.test(value.pendingSnapshotId))) &&
     (value.fingerprint === undefined ||
       (object(value.fingerprint) &&
         number(value.fingerprint.size) &&
         Number.isSafeInteger(value.fingerprint.size) &&
-        number(value.fingerprint.mtime))) &&
+        number(value.fingerprint.mtime) &&
+        (value.fingerprint.sha256 === undefined ||
+          (typeof value.fingerprint.sha256 === "string" &&
+            /^[a-f0-9]{64}$/.test(value.fingerprint.sha256))))) &&
     (value.failure === undefined ||
       (object(value.failure) &&
         typeof value.failure.code === "string" &&
         typeof value.failure.message === "string" &&
+        (value.failure.notePath === undefined ||
+          (typeof value.failure.notePath === "string" &&
+            normalizeVaultPath(value.failure.notePath) !== null)) &&
         stages.includes(value.failure.stage as string) &&
         ["safe", "uncertain", "non-retryable"].includes(
           value.failure.retry as string,
@@ -110,7 +126,10 @@ function validLog(value: unknown): value is LogEntry {
     typeof value.message === "string" &&
     (value.vaultPath === undefined ||
       (typeof value.vaultPath === "string" &&
-        normalizeVaultPath(value.vaultPath) !== null))
+        normalizeVaultPath(value.vaultPath) !== null)) &&
+    (value.notePath === undefined ||
+      (typeof value.notePath === "string" &&
+        normalizeVaultPath(value.notePath) !== null))
   );
 }
 
@@ -242,6 +261,7 @@ export class JobStore {
         [
           "fingerprint",
           "remoteUrl",
+          "pendingSnapshotId",
           "rewrittenNotePaths",
           "rewrittenReferenceCount",
           "failure",
@@ -298,6 +318,62 @@ export class JobStore {
     });
   }
 
+  completeSnapshotCleanup(
+    path: string,
+    snapshotId: string,
+  ): Promise<JobRecord> {
+    return this.mutate((draft) => {
+      const job = draft.jobs.find(
+        (candidate) => candidate.vaultPath === this.path(path),
+      );
+      if (!job || job.pendingSnapshotId !== snapshotId)
+        throw new Error("Snapshot cleanup checkpoint changed.");
+      delete job.pendingSnapshotId;
+      job.updatedAt = this.now();
+      if (!validJob(job)) throw new Error("Invalid snapshot cleanup update.");
+      return job;
+    });
+  }
+
+  /** Begin a new content generation only after a strong hash proves that a
+   * saved URL belongs to different bytes at the same Vault path. */
+  resetChangedSourceGeneration(
+    path: string,
+    expectedPreviousSha256: string,
+    fingerprint: SourceFingerprint,
+  ): Promise<JobRecord> {
+    const captured = clone(fingerprint);
+    return this.mutate((draft) => {
+      const index = draft.jobs.findIndex(
+        (candidate) => candidate.vaultPath === this.path(path),
+      );
+      const previous = draft.jobs[index];
+      if (
+        !previous ||
+        previous.state !== "discovering-references" ||
+        !previous.remoteUrl ||
+        previous.pendingSnapshotId ||
+        previous.fingerprint?.sha256 !== expectedPreviousSha256 ||
+        !captured?.sha256 ||
+        captured.sha256 === expectedPreviousSha256
+      )
+        throw new Error("Source generation cannot be reset safely.");
+      const timestamp = this.now();
+      const next: JobRecord = {
+        vaultPath: previous.vaultPath,
+        state: "discovering-references",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        fingerprint: captured,
+        rewrittenNotePaths: [],
+        rewrittenReferenceCount: 0,
+      };
+      if (!validJob(next)) throw new Error("Invalid replacement generation.");
+      draft.jobs[index] = next;
+      return next;
+    });
+  }
+
   /** Only a queue reservation with no existing worker may recover interrupted work.
    * Recovery preserves every upload/rewrite checkpoint and never bypasses terminal retry policy.
    */
@@ -314,9 +390,11 @@ export class JobStore {
           "uploading",
           "rewriting",
           "verifying",
+          "deleting",
         ].includes(job.state)
       )
         throw new Error("Only interrupted in-flight jobs can be recovered.");
+      if (job.state === "deleting") return job;
       const uncertain =
         job.state === "uploading" ||
         (!job.remoteUrl &&
@@ -383,6 +461,9 @@ export class JobStore {
       code: job.failure.code,
       message: job.failure.message,
       vaultPath: job.vaultPath,
+      ...(job.failure.notePath === undefined
+        ? {}
+        : { notePath: job.failure.notePath }),
     });
   }
 
@@ -419,6 +500,14 @@ export class JobStore {
     )
       throw new Error("A saved remote URL cannot be replaced.");
     if (previous.remoteUrl) next.remoteUrl = previous.remoteUrl;
+    if (
+      previous.pendingSnapshotId &&
+      next.pendingSnapshotId &&
+      previous.pendingSnapshotId !== next.pendingSnapshotId
+    )
+      throw new Error("A pending snapshot checkpoint cannot be replaced.");
+    if (previous.pendingSnapshotId)
+      next.pendingSnapshotId = previous.pendingSnapshotId;
   }
 
   private serialize<T>(operation: () => Promise<T>): Promise<T> {

@@ -31,6 +31,7 @@ const pendingStates = new Set<JobState>([
   "uploading",
   "rewriting",
   "verifying",
+  "deleting",
 ]);
 
 const failureCopy = new Map<string, Parameters<typeof t>[1]>([
@@ -69,6 +70,7 @@ const failureCopy = new Map<string, Parameters<typeof t>[1]>([
   ["timeout", "failure.upload"],
   ["disconnected", "failure.upload"],
   ["invalid-saved-url", "failure.upload"],
+  ["snapshot-cleanup-failed", "failure.cleanup"],
   ["interrupted-upload", "failure.upload"],
   ["worker-uncertain", "failure.upload"],
   ["invalid-remote-url", "failure.rewrite"],
@@ -276,7 +278,7 @@ export class StatusModal extends Modal {
       if (job.failure) {
         const failure = document.createElement("span");
         const copy = failureCopy.get(job.failure.code) ?? "failure.generic";
-        failure.textContent = `${t(this.locale, `stage.${job.failure.stage}` as Parameters<typeof t>[1])}: ${t(this.locale, copy)}`;
+        failure.textContent = `${t(this.locale, `stage.${job.failure.stage}` as Parameters<typeof t>[1])}: ${t(this.locale, copy)}${job.failure.notePath ? ` · ${job.failure.notePath}` : ""}`;
         row.append(failure);
         if (job.failure.retry === "safe" && job.state !== "uncertain")
           this.jobAction(row, "retry", job.vaultPath, "common.retry", () =>

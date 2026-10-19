@@ -14,6 +14,7 @@ export type UploadWorker = (
 interface Entry {
   path: string;
   controller: AbortController;
+  cleanupOnly: boolean;
   ready: Promise<boolean>;
   done: Promise<void>;
   finish: () => void;
@@ -63,6 +64,12 @@ export class UploadQueue {
     return this.reserve(path, options);
   }
 
+  /** Remove a retained private snapshot for an uncertain upload without
+   * acknowledging, retrying, or otherwise advancing that upload. */
+  cleanupUncertainSnapshot(path: string): Promise<EnqueueResult> {
+    return this.reserve(path, undefined, false, false, true);
+  }
+
   async retrySafeFailures(): Promise<EnqueueResult[]> {
     const safe = this.store
       .snapshot()
@@ -93,11 +100,27 @@ export class UploadQueue {
     await Promise.all([...this.entries.values()].map((entry) => entry.done));
   }
 
+  /** Wait only for the reservation currently owning this path. A later event
+   * can then re-evaluate durable state without extending the wait globally. */
+  async waitForPath(path: string): Promise<void> {
+    const normalized = normalizeVaultPath(path);
+    if (!normalized) return;
+    await this.entries.get(normalized)?.done;
+  }
+
+  /** True while this path is reserved, including the brief interval after the
+   * worker has persisted a terminal result but before the reservation settles. */
+  hasReservation(path: string): boolean {
+    const normalized = normalizeVaultPath(path);
+    return normalized ? this.entries.has(normalized) : false;
+  }
+
   private reserve(
     path: string,
     retry?: { acknowledgeUncertain?: boolean },
     recover = false,
     newGeneration = false,
+    cleanupOnly = false,
   ): Promise<EnqueueResult> {
     const normalized = normalizeVaultPath(path);
     if (!normalized)
@@ -106,6 +129,14 @@ export class UploadQueue {
       return Promise.resolve({ ok: true, value: "duplicate" });
     const previous = this.get(normalized);
     if (
+      cleanupOnly &&
+      (!previous ||
+        previous.state !== "uncertain" ||
+        previous.pendingSnapshotId === undefined)
+    )
+      return Promise.resolve({ ok: false, error: { code: "not-retryable" } });
+    if (
+      !cleanupOnly &&
       !retry &&
       previous &&
       isTerminalState(previous.state) &&
@@ -131,6 +162,7 @@ export class UploadQueue {
     const entry: Entry = {
       path: normalized,
       controller: new AbortController(),
+      cleanupOnly,
       ready: Promise.resolve(false),
       done,
       finish,
@@ -138,6 +170,7 @@ export class UploadQueue {
     this.entries.set(normalized, entry);
     const initialize = async (): Promise<EnqueueResult> => {
       try {
+        if (cleanupOnly) return { ok: true, value: "enqueued" };
         if (newGeneration && previous?.state === "trashed")
           await this.store.resetTrashedGeneration(normalized, this.now());
         else if (recover && previous && previous.state !== "queued") {
@@ -191,16 +224,25 @@ export class UploadQueue {
       this.active = entry;
       try {
         if (!(await entry.ready)) continue;
-        if (isTerminalState(this.get(entry.path)!.state)) continue;
+        if (isTerminalState(this.get(entry.path)!.state) && !entry.cleanupOnly)
+          continue;
         if (!entry.controller.signal.aborted) {
-          await this.store.transition(entry.path, "waiting-stable");
+          if (!entry.cleanupOnly && this.get(entry.path)!.state !== "deleting")
+            await this.store.transition(entry.path, "waiting-stable");
           if (!entry.controller.signal.aborted)
             await this.worker(this.get(entry.path)!, entry.controller.signal);
         }
         const job = this.get(entry.path);
-        if (job && !isTerminalState(job.state)) await this.settle(entry, false);
+        if (
+          !entry.cleanupOnly &&
+          job &&
+          !isTerminalState(job.state) &&
+          job.state !== "deleting"
+        )
+          await this.settle(entry, false);
       } catch {
-        await this.settle(entry, true).catch(() => {});
+        if (!entry.cleanupOnly && this.get(entry.path)?.state !== "deleting")
+          await this.settle(entry, true).catch(() => {});
       } finally {
         this.entries.delete(entry.path);
         this.active = undefined;
@@ -211,7 +253,7 @@ export class UploadQueue {
 
   private async settle(entry: Entry, threw: boolean): Promise<void> {
     const job = this.get(entry.path);
-    if (!job || isTerminalState(job.state)) return;
+    if (!job || isTerminalState(job.state) || job.state === "deleting") return;
     const uncertain = job.state === "uploading";
     const cancelled = entry.controller.signal.aborted && !uncertain;
     await this.store

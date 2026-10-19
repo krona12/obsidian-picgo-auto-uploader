@@ -26,6 +26,7 @@ export type JobState =
   | "uploading"
   | "rewriting"
   | "verifying"
+  | "deleting"
   | "trashed"
   | "skipped"
   | "failed"
@@ -46,6 +47,7 @@ export type ErrorStage =
 export interface SourceFingerprint {
   size: number;
   mtime: number;
+  sha256?: string;
 }
 
 /** Messages must be redacted before they enter persistence or UI snapshots. */
@@ -54,6 +56,7 @@ export interface JobFailure {
   stage: ErrorStage;
   message: string;
   retry: RetryClassification;
+  notePath?: string;
 }
 
 /** All timestamps are Unix milliseconds; vaultPath is the normalized identity. */
@@ -64,6 +67,8 @@ export interface JobRecord {
   updatedAt: number;
   fingerprint?: SourceFingerprint;
   remoteUrl?: string;
+  /** Opaque temp-directory basename; never an absolute path. */
+  pendingSnapshotId?: string;
   rewrittenNotePaths: string[];
   rewrittenReferenceCount: number;
   failure?: JobFailure;
@@ -76,6 +81,7 @@ export interface LogEntry {
   code: string;
   message: string;
   vaultPath?: string;
+  notePath?: string;
 }
 
 export interface SettingsValidationError {

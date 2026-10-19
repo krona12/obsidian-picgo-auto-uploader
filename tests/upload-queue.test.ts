@@ -35,6 +35,24 @@ function store(jobs: JobRecord[] = []) {
 }
 
 describe("sequential upload queue", () => {
+  it("dispatches a recovered deletion intent without restarting upload phases", async () => {
+    const intent = record("attachments/a.png", "deleting", "safe");
+    delete intent.failure;
+    const jobs = store([intent]);
+    await jobs.hydrate();
+    const seen: JobState[] = [];
+    const queue = new UploadQueue(jobs, async (current) => {
+      seen.push(current.state);
+      await jobs.transition(current.vaultPath, "trashed");
+    });
+    expect(await queue.recover(intent.vaultPath)).toEqual({
+      ok: true,
+      value: "enqueued",
+    });
+    await queue.drain();
+    expect(seen).toEqual(["deleting"]);
+    expect(jobs.snapshot().jobs[0]?.state).toBe("trashed");
+  });
   it("reserves a restored trashed path once and dispatches a clean generation", async () => {
     const completed = record("attachments/a.png", "trashed", "safe");
     const jobs = store([completed]);

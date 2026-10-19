@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { Window } from "happy-dom";
 import type {
   CachedMetadata,
   EmbedCache,
@@ -140,6 +141,7 @@ function linked() {
 }
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllGlobals();
 });
 
 describe("Obsidian reference discovery and rewriting", () => {
@@ -179,16 +181,23 @@ describe("Obsidian reference discovery and rewriting", () => {
     expect(f.handlers.size).toBe(0);
   });
 
-  it("blocks any missing Markdown cache, including unrelated notes", async () => {
+  it("ignores a missing Markdown cache when the note cannot reference the target", async () => {
     const f = linked();
     const unrelated = f.add("unrelated.md", "hello");
     f.caches.set(unrelated, null);
     const plan = await f.service.discover(f.target);
+    expect(plan.blockers).toEqual([]);
+    expect(plan.references.map((reference) => reference.notePath)).toEqual([
+      "one.md",
+    ]);
+  });
+
+  it("blocks a missing Markdown cache when raw text can reference the target", async () => {
+    const f = linked();
+    f.caches.set(f.note, null);
+    const plan = await f.service.discover(f.target);
     expect(plan.blockers).toContainEqual(
-      expect.objectContaining({
-        code: "missing-cache",
-        notePath: "unrelated.md",
-      }),
+      expect.objectContaining({ code: "missing-cache", notePath: "one.md" }),
     );
     expect(
       await f.service.rewrite(plan, "https://cdn.example/a.png"),
@@ -203,6 +212,141 @@ describe("Obsidian reference discovery and rewriting", () => {
     expect(f.contents.get("one.md")).toBe("![[a.png]]");
   });
 
+  it("blocks a missing cache for an angle-bracket extensionless image destination", async () => {
+    const f = linked();
+    const note = f.add("angle-extensionless.md", "![](<a>)");
+    f.caches.set(note, null);
+    expect((await f.service.discover(f.target)).blockers).toContainEqual(
+      expect.objectContaining({
+        code: "missing-cache",
+        notePath: "angle-extensionless.md",
+      }),
+    );
+  });
+
+  it.each([
+    ["inline-link.md", "[download](<a>)"],
+    ["reference-link.md", "[download][asset]\n[asset]: a"],
+  ])(
+    "blocks a missing cache for an extensionless Markdown link: %s",
+    async (path, source) => {
+      const f = linked();
+      const note = f.add(path, source);
+      f.caches.set(note, null);
+      expect((await f.service.discover(f.target)).blockers).toContainEqual(
+        expect.objectContaining({ code: "missing-cache", notePath: path }),
+      );
+    },
+  );
+
+  it("ignores an unrelated external HTML image even when its filename matches", async () => {
+    const f = linked();
+    f.add("external-html.md", '<img src="https://cdn.example/a.png">');
+    const plan = await f.service.discover(f.target);
+    expect(plan.blockers).toEqual([]);
+    expect(plan.references.map((reference) => reference.notePath)).toEqual([
+      "one.md",
+    ]);
+  });
+
+  it.each([
+    ["body entity", "<span>Copyright</span> &copy; 2026"],
+    [
+      "alt entity",
+      '<img src="https://cdn.example/other.png" alt="Copyright &copy;">',
+    ],
+  ])(
+    "ignores an unknown named entity outside a URL token: %s",
+    async (_label, text) => {
+      const f = linked();
+      f.add("unrelated-entity.md", text);
+      const plan = await f.service.discover(f.target);
+      expect(plan.blockers).toEqual([]);
+      expect(plan.references.map((reference) => reference.notePath)).toEqual([
+        "one.md",
+      ]);
+    },
+  );
+
+  it("ignores an unresolved cached image when its destination cannot name the target", async () => {
+    const f = linked();
+    const source = "![Other](../outside/other.png)";
+    f.add("broken.md", source, [embed(source, "../outside/other.png")]);
+    const plan = await f.service.discover(f.target);
+    expect(plan.blockers).toEqual([]);
+    expect(plan.references.map((reference) => reference.notePath)).toEqual([
+      "one.md",
+    ]);
+  });
+
+  it("blocks an unresolved cached extensionless image that can name the target", async () => {
+    const f = linked();
+    const source = "![Target](attachments/a)";
+    f.add("extensionless-inline.md", source, [embed(source, "attachments/a")]);
+    const plan = await f.service.discover(f.target);
+    expect(plan.blockers).toContainEqual(
+      expect.objectContaining({
+        code: "unresolved-destination",
+        notePath: "extensionless-inline.md",
+      }),
+    );
+  });
+
+  it("blocks a bare extensionless cached destination that can name the target", async () => {
+    const f = linked();
+    const source = "![](<a>)";
+    f.add("bare-extensionless.md", source, [embed(source, "a")]);
+    const plan = await f.service.discover(f.target);
+    expect(plan.blockers).toContainEqual(
+      expect.objectContaining({
+        code: "unresolved-destination",
+        notePath: "bare-extensionless.md",
+      }),
+    );
+  });
+
+  it("blocks an unresolved cached Markdown link that can name the target", async () => {
+    const f = linked();
+    const source = "[download](a)";
+    const note = f.add("unresolved-link.md", source);
+    f.caches.set(note, { links: [embed(source, "a")] });
+    const plan = await f.service.discover(f.target);
+    expect(plan.blockers).toContainEqual(
+      expect.objectContaining({
+        code: "unresolved-destination",
+        notePath: "unresolved-link.md",
+      }),
+    );
+  });
+
+  it("does not let an unsupported cached embed hide an extensionless reference-style target", async () => {
+    const f = linked();
+    const source = "![Alt][image]\n[image]: attachments/a";
+    f.add("cached-reference.md", source, [
+      embed("![Alt][image]", "attachments/a"),
+    ]);
+    const plan = await f.service.discover(f.target);
+    expect(plan.blockers).toContainEqual(
+      expect.objectContaining({
+        code: "unsupported-syntax",
+        notePath: "cached-reference.md",
+      }),
+    );
+  });
+
+  it("ignores a malformed cached non-image link that cannot name the target", async () => {
+    const f = linked();
+    const unrelated = f.add("broken-link.md", "[[other%ZZ]]");
+    f.caches.set(unrelated, {
+      links: [embed("[[other%ZZ]]", "other%ZZ")],
+    });
+    const plan = await f.service.discover(f.target);
+    expect(plan.blockers).toEqual([]);
+    expect(plan.references.map((reference) => reference.notePath)).toEqual([
+      "one.md",
+    ]);
+  });
+
   it.each([
     ["canvas.canvas", '{"nodes":[{"type":"file","file":"attachments/a.png"}]}'],
     ["view.base", 'filter: file.name == "a.png"'],
@@ -213,7 +357,6 @@ describe("Obsidian reference discovery and rewriting", () => {
     ["encoded.canvas", '{"file":"attachments/\\u0061.png"}'],
     ["encoded.md", "![Alt][image]\n[image]: attachments/%61.png"],
     ["extensionless.md", "![Alt][image]\n[image]: attachments/a"],
-    ["entity.html", '<img src="attachments/&alpha;.png">'],
   ])("blocks plausible unsupported dependencies in %s", async (path, text) => {
     const f = linked();
     f.add(path, text);
@@ -224,6 +367,79 @@ describe("Obsidian reference discovery and rewriting", () => {
       }),
     );
     expect(f.contents.get(path)).toBe(text);
+  });
+
+  it.each([
+    [
+      "escaped-stylesheet.html",
+      '<style>.image { background: url("attachments/\\61 \\2e png") }</style>',
+    ],
+    [
+      "escaped-style-attribute.md",
+      '<div style="background-image:url(attachments/\\61 \\2e png)"></div>',
+    ],
+  ])(
+    "blocks a CSS-escaped local dependency in discovery and final verification: %s",
+    async (path, text) => {
+      const f = linked();
+      await f.service.rewrite(
+        await f.service.discover(f.target),
+        "https://cdn.example/a.png",
+      );
+      f.add(path, text);
+      expect((await f.service.discover(f.target)).blockers).toContainEqual(
+        expect.objectContaining({
+          code: "unsupported-dependency",
+          notePath: path,
+        }),
+      );
+      expect(await f.service.verifyNoLocalReferences(f.target)).toMatchObject({
+        ok: false,
+        error: { code: "unsupported-dependency", notePath: path },
+      });
+    },
+  );
+
+  it.each([
+    [
+      "simple escape",
+      '<style>.image { background: url("attachments/a\\pp.png") }</style>',
+    ],
+    [
+      "line continuation",
+      '<style>.image { background: url("attachments/a\\\npp.png") }</style>',
+    ],
+    [
+      "CRLF continuation",
+      '<style>.image { background: url("attachments/a\\\r\npp.png") }</style>',
+    ],
+    [
+      "form-feed continuation",
+      '<style>.image { background: url("attachments/a\\\fpp.png") }</style>',
+    ],
+    [
+      "six-digit hex escape",
+      '<style>.image { background: url("attachments/\\000061pp.png") }</style>',
+    ],
+    [
+      "hex escape with CRLF terminator",
+      '<style>.image { background: url("attachments/\\61\r\npp.png") }</style>',
+    ],
+    ["Windows separator", '<img src="attachments\\app.png">'],
+  ])("blocks a local dependency encoded with %s", async (_label, text) => {
+    const f = fixture();
+    const target = f.add("attachments/app.png", "image");
+    f.add("escaped.html", text);
+    expect((await f.service.discover(target)).blockers).toContainEqual(
+      expect.objectContaining({
+        code: "unsupported-dependency",
+        notePath: "escaped.html",
+      }),
+    );
+    expect(await f.service.verifyNoLocalReferences(target)).toMatchObject({
+      ok: false,
+      error: { code: "unsupported-dependency", notePath: "escaped.html" },
+    });
   });
 
   it.each(["stale", "range", "overlap", "unresolved", "syntax", "mismatch"])(
@@ -262,14 +478,12 @@ describe("Obsidian reference discovery and rewriting", () => {
       '<div style="background-image: url(attachments/a&period;png)"></div>',
     ],
     [
+      "mixed-external-html.md",
+      '<img src="https://cdn.example/other.png" style="background-image:url(attachments/a.png)">',
+    ],
+    [
       "stylesheet.html",
       '<style>.image { background: url("attachments/a&period;png") }</style>',
-    ],
-    ["unknown-link.html", '<a href="attachments/&unknown;">image</a>'],
-    ["prototype-entity.html", '<a href="attachments/&constructor;">image</a>'],
-    [
-      "unknown-style.html",
-      '<style>.image { background: url("attachments/&unknown;") }</style>',
     ],
   ])(
     "blocks entity-bearing unsupported URLs in discovery and final verification: %s",
@@ -291,6 +505,85 @@ describe("Obsidian reference discovery and rewriting", () => {
         error: { code: "unsupported-dependency", notePath: path },
       });
       expect(f.contents.get(path)).toBe(text);
+    },
+  );
+
+  it.each([
+    ["different standard entity", '<img src="attachments/&alpha;.png">'],
+    ["invalid entity", '<a href="attachments/&unknown;.png">image</a>'],
+    [
+      "invalid CSS entity",
+      '<style>.image { background: url("attachments/&unknown;.png") }</style>',
+    ],
+    [
+      "external anchor",
+      '<a href="https://cdn.example/target.png?mark=&copy;">image</a>',
+    ],
+    [
+      "external anchor with numeric entity",
+      '<a href="https&#58;//cdn.example/target.png">image</a>',
+    ],
+    [
+      "external poster",
+      '<video poster="https://cdn.example/target.png"></video>',
+    ],
+    [
+      "external candidate in a mixed srcset",
+      '<img srcset="https://cdn.example/target.png 1x, attachments/other.png 2x">',
+    ],
+    [
+      "external CSS URL",
+      '<style>.image { background: url("https://cdn.example/target.png?mark=&copy;") }</style>',
+    ],
+    [
+      "escaped external CSS URL",
+      '<style>.image { background: url("\\68 ttps://cdn.example/target.png") }</style>',
+    ],
+    [
+      "simple-escaped external CSS URL",
+      '<style>.image { background: url("h\\ttps://cdn.example/target.png") }</style>',
+    ],
+    [
+      "continued external CSS URL",
+      '<style>.image { background: url("ht\\\ntps://cdn.example/target.png") }</style>',
+    ],
+  ])(
+    "ignores a URL token unrelated to the target: %s",
+    async (_label, text) => {
+      const f = fixture();
+      const target = f.add("attachments/target.png", "image");
+      const note = f.add("one.md", "![[target.png]]", [
+        embed("![[target.png]]", "target.png"),
+      ]);
+      f.destinations.set("one.md:target.png", target);
+      f.add("unrelated-url.md", text);
+      const plan = await f.service.discover(target);
+      expect(plan.blockers).toEqual([]);
+      expect(plan.references.map((reference) => reference.notePath)).toEqual([
+        note.path,
+      ]);
+    },
+  );
+
+  it.each([
+    ["HTML attribute", '<img src="attachments/&alpha;.png">'],
+    [
+      "CSS URL",
+      '<style>.image { background: url("attachments/&alpha;.png") }</style>',
+    ],
+  ])(
+    "decodes a standard named entity in a matching %s",
+    async (_label, text) => {
+      vi.stubGlobal("document", new Window().document);
+      const f = fixture();
+      const target = f.add("attachments/α.png", "image");
+      f.add("entity.html", text);
+      expect((await f.service.discover(target)).blockers).toContainEqual(
+        expect.objectContaining({
+          code: "unsupported-dependency",
+          notePath: "entity.html",
+        }),
+      );
     },
   );
 

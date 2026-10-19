@@ -4,14 +4,14 @@
 
 PicGo Auto Uploader is a safety-first Obsidian plugin for converting synced local image attachments into PicGo-hosted Markdown embeds. It is Windows desktop only, requires Obsidian 1.7.2 or later, and runs only while Obsidian is open.
 
-The plugin scans supported images across the Vault, waits for each file to stop changing, uploads only images that are actually referenced, rewrites every supported Markdown embed, verifies the result, and then moves the source to the Vault trash. Hidden folders and the Vault trash are excluded. Uncertainty always preserves the local file.
+The plugin scans supported images across the Vault, waits for each file to stop changing, uploads only images that are actually referenced, rewrites every supported Markdown embed, verifies the result, and then permanently deletes the local source. Hidden folders and the Vault trash are excluded. Uncertainty always preserves the local file.
 
 ## Requirements
 
 - Windows desktop and Obsidian 1.7.2+.
 - PicGo with its HTTP server enabled. The default address is `http://127.0.0.1:36677`.
 - A working PicGo uploader/provider configuration.
-- A backup or file-history system. Start with a small test folder before enabling the plugin across an important Vault.
+- A backup or file-history system. Successful conversions permanently delete their local source, so start with a small test folder before enabling the plugin across an important Vault.
 
 The PicGo `POST /heartbeat` endpoint is used only by **Test connection**. Each actual upload sends one image per `POST /upload` request; a successful heartbeat does not guarantee that a later upload will succeed.
 
@@ -20,10 +20,10 @@ The PicGo `POST /heartbeat` endpoint is used only by **Test connection**. Each a
 1. A startup scan, create/modify events, and a five-minute reconciliation scan find eligible images across normal Vault folders. Vault-wide discovery is enabled by default and can be limited to configured attachment folders.
 2. The file must pass the extension/size rules and remain unchanged for the configured stability observations.
 3. Obsidian metadata must resolve at least one supported image embed to the exact source file. An orphan is neither uploaded nor deleted.
-4. The absolute Windows source path is sent to PicGo. The response must contain one validated `http:` or `https:` URL.
-5. The confirmed URL is saved before notes are changed. A saved remote URL resumes rewriting after restart without another upload.
+4. The plugin makes an immutable temporary snapshot with the original filename and sends that absolute Windows path to PicGo. Permanent source deletion is blocked until that snapshot is confirmed removed. If Windows temporarily locks it, the opaque cleanup checkpoint and any confirmed URL are saved while the Vault source is retained. Reconciliation retries only the cleanup, even for an uncertain upload; it never treats that cleanup as permission to upload again, rewrite, or delete the source. A tightly scoped startup sweep removes plugin snapshots left by a prior crash without touching snapshots owned by another live process. The response must contain one validated `http:` or `https:` URL.
+5. The confirmed URL and snapshot SHA-256 are saved before notes are changed. Restart recovery reuses a saved URL only when the current source has the same content hash.
 6. All supported references are rewritten and checked again against fresh note content and metadata.
-7. Only after every deletion gate passes does Obsidian move the local image to the Vault `.trash` folder. It is never permanently deleted by this plugin.
+7. Only after every deletion gate passes does the plugin call Obsidian's permanent-delete API. The source does not remain in Vault `.trash` or the Windows recycle bin.
 
 Uploads are sequential. A timeout or disconnect after dispatch is marked `uncertain` and is not automatically retried because PicGo may already have stored the image. Inspect PicGo and the provider before explicitly retrying uncertain work; a retry may create a duplicate remote image.
 
@@ -43,30 +43,31 @@ Supported image embeds include:
 
 The target must resolve to the exact attachment in the source note's context. The plugin preserves Markdown alt text, titles, and Obsidian display/size text while converting to an external image embed.
 
-Within Markdown files, HTML `<img>`, reference-style/block links, malformed embeds, and other plausible raw dependencies are not rewritten but do block deletion. In addition to Markdown, only `.canvas`, `.base`, and `.html` files are scanned conservatively for a plausible path or file-name dependency; a match blocks deletion.
+Within Markdown files, local HTML `<img>`, reference-style/block links, malformed embeds, and other raw dependencies are not rewritten but block deletion only when they can plausibly identify the current target. Proven external HTTP(S) HTML images and unrelated broken image syntax do not block every attachment. In addition to Markdown, only `.canvas`, `.base`, and `.html` files are scanned conservatively for a plausible path or file-name dependency; a target-specific match blocks deletion.
 
-Other formats, including Excalidraw and unknown plugin data, are not interpreted or scanned in 0.1.1. References stored only in unknown plugin data are not detected and are not protected by the deletion check. Do not enable automatic processing for attachments relied on only by such formats; keep backups and test with a small folder. Missing/stale Markdown metadata, unreadable protected files, overlapping offsets, or concurrent edits also leave the source in place.
+Other formats, including Excalidraw and unknown plugin data, are not interpreted or scanned in 0.1.2. References stored only in unknown plugin data are not detected and are not protected by the deletion check. Do not enable automatic processing for attachments relied on only by such formats; keep backups and test with a small folder. Missing/stale Markdown metadata that may involve the target, unreadable protected files, overlapping target offsets, or concurrent edits also leave the source in place.
 
 ## Deletion safety
 
-A source can be trashed only when all of these are true:
+A source can be permanently deleted only when all of these are true:
 
 - PicGo returned exactly one validated remote URL.
 - At least one reference was positively rewritten.
 - Fresh reference verification finds no local or ambiguous dependency.
-- The unchanged source fingerprint still matches the verified upload input.
+- The source's size, modification time, and SHA-256 still match the exact snapshot PicGo uploaded.
+- No private temporary upload snapshot remains pending cleanup.
 - The plugin lifecycle is still active.
 - The file is still the exact source identity being processed.
 
-Any upload, rewrite, verification, fingerprint, lifecycle, or trash error retains the local attachment and records a redacted status. Orphans remain local. The sole deletion operation is Obsidian's recoverable Vault trash API, which moves files to `.trash` rather than permanently deleting them.
+Any upload, rewrite, verification, fingerprint, lifecycle, or pre-delete error retains the local attachment and records a redacted status, including the first blocking note path when available. Orphans remain local. A durable `deleting` intent lets restart recovery distinguish an already removed source from an unchanged source that still needs final verification; it never reuses the intent for replacement bytes. The sole deletion operation is `Vault.delete(file, true)`, reached only after the full safety predicate; deletion is not recoverable from Vault `.trash` or the Windows recycle bin.
 
 ## Privacy and network access
 
-The plugin reads eligible Vault images, Markdown notes, and Obsidian metadata. It sends the absolute Windows source path and, when configured, an optional bearer secret only to the configured PicGo endpoint. PicGo then reads the image and sends its bytes to the image provider selected by the user.
+The plugin reads eligible Vault images, Markdown notes, and Obsidian metadata. It sends an absolute path to a short-lived private snapshot and, when configured, an optional bearer secret only to the configured PicGo endpoint. PicGo then reads the snapshot and sends its bytes to the image provider selected by the user.
 
-Version 0.1.1 has no telemetry and performs no returned-URL probe. It does not contact an analytics service. Logs and exported diagnostics redact configured secrets and absolute paths; they do not contain image bytes or arbitrary PicGo response bodies.
+Version 0.1.2 has no telemetry and performs no returned-URL probe. It does not contact an analytics service. Logs and exported diagnostics redact configured secrets and absolute paths; they do not contain image bytes or arbitrary PicGo response bodies.
 
-To remain compatible with Obsidian 1.7.2, version 0.1.1 does not rely on newer SecretStorage APIs. The optional secret is plaintext in this plugin's local `data.json`; syncing that file can expose it. Exclude `.obsidian/plugins/picgo-auto-uploader/data.json` from synchronization or do not store a secret if that risk is unacceptable.
+To remain compatible with Obsidian 1.7.2, version 0.1.2 does not rely on newer SecretStorage APIs. The optional secret is plaintext in this plugin's local `data.json`; syncing that file can expose it. Exclude `.obsidian/plugins/picgo-auto-uploader/data.json` from synchronization or do not store a secret if that risk is unacceptable.
 
 Plain HTTP is safe from passive network observers only when it stays on the local machine. A non-loopback HTTP endpoint exposes paths and credentials on the network, so the settings page requires explicit acknowledgement. Prefer loopback or HTTPS.
 
@@ -85,8 +86,8 @@ Commands are named exactly:
 ## Recovery
 
 1. Disable automatic processing while investigating.
-2. Restore the attachment from the Vault `.trash` folder if it was moved there.
-3. Recover or revert Markdown from your backup or file history when needed.
+2. Restore a permanently deleted attachment from your backup, sync history, or file-history system when needed.
+3. Recover or revert Markdown from the same backup or history source when needed.
 4. Review the status center and export sanitized diagnostics.
 5. For `uncertain` uploads, inspect PicGo and the image provider before retrying; the remote image may already exist and an explicit retry can duplicate it.
 

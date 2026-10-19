@@ -350,6 +350,7 @@ export default class PicGoAutoUploaderPlugin extends Plugin {
   private async buildRuntime(settings: PluginSettings): Promise<Runtime> {
     if (!this.repository) throw new Error("Repository unavailable.");
     const source = new ObsidianVaultAdapter(this.app.vault);
+    await source.initialize();
     const references = new ObsidianReferenceService(
       this.app.vault,
       this.app.metadataCache,

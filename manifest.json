@@ -1,7 +1,7 @@
 {
   "id": "picgo-auto-uploader",
   "name": "PicGo Auto Uploader",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "minAppVersion": "1.7.2",
   "description": "Upload local image attachments through PicGo and safely update Markdown embeds.",
   "author": "krona12",

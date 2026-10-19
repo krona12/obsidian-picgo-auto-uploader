@@ -11,7 +11,7 @@ const english = {
   "settings.title": "PicGo Auto Uploader",
   "settings.enabled": "Automatic processing",
   "settings.enabledDesc":
-    "Only referenced images are uploaded. Local files are moved to Vault trash only after every rewrite is verified.",
+    "Only referenced images are uploaded. Local files are permanently deleted only after every rewrite is verified.",
   "settings.origin": "PicGo server",
   "settings.originDesc": "Base address of the PicGo HTTP service.",
   "settings.secret": "PicGo secret",
@@ -80,6 +80,8 @@ const english = {
   "failure.reference":
     "The attachment references could not be resolved safely.",
   "failure.upload": "PicGo did not return a confirmed upload result.",
+  "failure.cleanup":
+    "The private upload snapshot could not be removed; the Vault source was retained.",
   "failure.rewrite": "The note references could not be rewritten safely.",
   "failure.verify": "The rewritten references could not be verified.",
   "failure.lifecycle": "The queued operation could not be completed.",
@@ -100,6 +102,7 @@ const english = {
   "job.uploading": "Uploading",
   "job.rewriting": "Rewriting notes",
   "job.verifying": "Verifying",
+  "job.deleting": "Finalizing permanent deletion",
   "job.trashed": "Completed",
   "job.skipped": "Skipped",
   "job.failed": "Failed",
@@ -111,7 +114,7 @@ const english = {
   "stage.upload": "Upload",
   "stage.rewrite": "Rewrite",
   "stage.verify": "Verification",
-  "stage.trash": "Trash",
+  "stage.trash": "Permanent deletion",
   "stage.lifecycle": "Lifecycle",
 } as const;
 
@@ -128,7 +131,7 @@ const chinese: Record<TranslationKey, string> = {
   "settings.title": "PicGo 自动上传",
   "settings.enabled": "自动处理",
   "settings.enabledDesc":
-    "只上传被引用的图片。仅在所有引用修改通过验证后，才将本地文件移入仓库回收站。",
+    "只上传被引用的图片。仅在上传、引用改写与复核全部成功后，才永久删除本地文件。",
   "settings.origin": "PicGo 服务",
   "settings.originDesc": "PicGo HTTP 服务的基础地址。",
   "settings.secret": "PicGo 密钥",
@@ -196,6 +199,7 @@ const chinese: Record<TranslationKey, string> = {
   "failure.orphan": "未找到支持的 Markdown 图片引用。",
   "failure.reference": "无法安全解析附件引用。",
   "failure.upload": "PicGo 未返回可确认的上传结果。",
+  "failure.cleanup": "无法删除私有上传临时快照；Vault 源图已保留。",
   "failure.rewrite": "无法安全改写笔记引用。",
   "failure.verify": "无法验证改写后的引用。",
   "failure.lifecycle": "队列操作未能完成。",
@@ -216,6 +220,7 @@ const chinese: Record<TranslationKey, string> = {
   "job.uploading": "正在上传",
   "job.rewriting": "正在改写笔记",
   "job.verifying": "正在验证",
+  "job.deleting": "正在完成永久删除",
   "job.trashed": "已完成",
   "job.skipped": "已跳过",
   "job.failed": "失败",
@@ -227,7 +232,7 @@ const chinese: Record<TranslationKey, string> = {
   "stage.upload": "上传",
   "stage.rewrite": "改写",
   "stage.verify": "验证",
-  "stage.trash": "回收站",
+  "stage.trash": "永久删除",
   "stage.lifecycle": "生命周期",
 };
 

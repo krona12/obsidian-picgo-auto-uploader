@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-10-19
+
+### Fixed
+
+- Scope reference blockers to the image currently being processed, so unrelated external HTML images, broken links, code examples, or missing metadata no longer block every upload in the Vault.
+- Preserve local CSS/HTML dependencies, extensionless Markdown image and file links, and unsupported cached reference-style embeds during target-scoped safety scans.
+- Preserve the first concrete reference failure code and blocking note path in job history and diagnostics.
+
+### Changed
+
+- Permanently delete a successfully converted local source with Obsidian's `Vault.delete` API instead of moving it into Vault `.trash`.
+- Upload an immutable temporary snapshot instead of the live Vault path, bind saved URLs to a SHA-256 content fingerprint, and remove the snapshot after PicGo returns.
+- Preserve a confirmed remote URL when post-upload verification or snapshot cleanup is temporarily unavailable, preventing an unnecessary duplicate upload. Persist an opaque cleanup checkpoint, retain the Vault source until the private snapshot is gone, and clean crash-left plugin snapshots on startup.
+- Retry only private-snapshot cleanup during reconciliation, including for uncertain uploads, without implicitly authorizing another upload, rewrite, or source deletion. Automatically re-evaluate legacy `discovery-blocked` jobs and safely changed source generations after restart.
+- Start a new job generation when a strong content hash proves that the file changed during upload, allowing the replacement bytes to upload without ever assigning the old URL to them.
+- Persist a `deleting` write-ahead state so restart recovery can reconcile completed or interrupted permanent deletion without another upload.
+
+### Safety
+
+- Permanent deletion still requires a confirmed PicGo response, no pending private snapshot cleanup, at least one persisted rewrite, fresh metadata verification, zero remaining target dependencies, an unchanged SHA-256 fingerprint, exact file identity, an active lifecycle, and a valid mutation proof.
+- Any failure before permanent-delete dispatch retains the local source. An ambiguous deletion outcome remains in the durable `deleting` state and is reconciled without another upload.
+
 ## [0.1.1] - 2026-10-19
 
 ### Changed
@@ -35,6 +57,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Orphans, ambiguous references, upload uncertainty, concurrent changes, and failures retain the local source.
 - Timeout/disconnect results never retry automatically, and saved URLs resume rewriting without duplicate uploads.
 
-[Unreleased]: https://github.com/krona12/obsidian-picgo-auto-uploader/compare/0.1.1...HEAD
+[Unreleased]: https://github.com/krona12/obsidian-picgo-auto-uploader/compare/0.1.2...HEAD
+[0.1.2]: https://github.com/krona12/obsidian-picgo-auto-uploader/compare/0.1.1...0.1.2
 [0.1.1]: https://github.com/krona12/obsidian-picgo-auto-uploader/compare/0.1.0...0.1.1
 [0.1.0]: https://github.com/krona12/obsidian-picgo-auto-uploader/releases/tag/0.1.0

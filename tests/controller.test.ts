@@ -9,8 +9,9 @@ function setup(
   enabled = true,
   initial?: JobSnapshot,
   storeOptions?: JobStoreOptions,
+  snapshotMaintenance?: Parameters<typeof fixture>[2],
 ) {
-  const f = fixture(initial, storeOptions);
+  const f = fixture(initial, storeOptions, snapshotMaintenance);
   f.settings.enabled = enabled;
   const controller = new AutoUploaderController({
     settings: f.settings,
@@ -225,6 +226,81 @@ describe("controller lifecycle", () => {
     expect(f.trash).toEqual(["attachments/image.png", "attachments/image.png"]);
     await f.controller.stop();
   });
+  it("reruns a path changed while its upload worker is active", async () => {
+    vi.useFakeTimers();
+    const f = setup();
+    f.blockUpload();
+    f.controller.start();
+    f.ready();
+    await f.controller.scanNow();
+    await vi.waitFor(() => expect(f.uploads()).toBe(1));
+
+    f.setSourceBytes([2]);
+    f.event();
+    await vi.advanceTimersByTimeAsync(10);
+    f.releaseUpload();
+
+    await f.queue.drain();
+    await vi.waitFor(() => expect(f.uploads()).toBe(2));
+    await f.queue.drain();
+    expect(f.uploadedBytes).toEqual([[1], [2]]);
+    expect(f.job().state).toBe("trashed");
+    await f.controller.stop();
+  });
+  it("retains the dirty event after a worker persists failure but still owns the path", async () => {
+    vi.useFakeTimers();
+    const f = setup();
+    f.setResponse({ ok: false, error: { kind: "refused", dispatched: false } });
+    f.holdWorkerAfterProcess();
+    f.controller.start();
+    f.ready();
+    await f.controller.scanNow();
+    await f.workerAfterProcess();
+    expect(f.job().state).toBe("failed");
+
+    f.setResponse({
+      ok: true,
+      value: {
+        statusCode: 200,
+        body: JSON.stringify({
+          success: true,
+          result: ["https://cdn.test/image.png"],
+        }),
+      },
+    });
+    f.setSourceBytes([2]);
+    f.event();
+    await vi.advanceTimersByTimeAsync(10);
+    f.releaseWorkerAfterProcess();
+
+    await f.queue.drain();
+    await vi.waitFor(() => expect(f.uploads()).toBe(2));
+    await f.queue.drain();
+    expect(f.uploadedBytes).toEqual([[1], [2]]);
+    expect(f.job().state).toBe("trashed");
+    await f.controller.stop();
+  });
+  it("does not automatically rerun an uncertain upload after a concurrent file event", async () => {
+    vi.useFakeTimers();
+    const f = setup();
+    f.setResponse({ ok: false, error: { kind: "timeout", dispatched: true } });
+    f.blockUpload();
+    f.controller.start();
+    f.ready();
+    await f.controller.scanNow();
+    await vi.waitFor(() => expect(f.uploads()).toBe(1));
+
+    f.setSourceBytes([2]);
+    f.event();
+    await vi.advanceTimersByTimeAsync(10);
+    f.releaseUpload();
+
+    await f.queue.drain();
+    await Promise.resolve();
+    expect(f.uploads()).toBe(1);
+    expect(f.job().state).toBe("uncertain");
+    await f.controller.stop();
+  });
   it("disabled automation permits manual scan and acknowledged uncertain retry", async () => {
     const f = setup(false);
     f.setResponse({ ok: false, error: { kind: "timeout", dispatched: true } });
@@ -420,7 +496,12 @@ describe("restart recovery and resilient shutdown", () => {
         state,
         createdAt: 1,
         updatedAt: 2,
-        fingerprint: { size: 0, mtime: 2 },
+        fingerprint: {
+          size: 1,
+          mtime: 2,
+          sha256:
+            "4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a",
+        },
         rewrittenNotePaths: [],
         rewrittenReferenceCount: 0,
         ...patch,
@@ -447,7 +528,12 @@ describe("restart recovery and resilient shutdown", () => {
     await f.queue.drain();
     expect(f.job()).toMatchObject({
       state: "trashed",
-      fingerprint: { size: 0, mtime: 2 },
+      fingerprint: {
+        size: 1,
+        mtime: 2,
+        sha256:
+          "4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a",
+      },
       remoteUrl: "https://cdn.test/image.png",
       rewrittenNotePaths: ["earlier.md", "note.md"],
       rewrittenReferenceCount: 2,
@@ -493,7 +579,7 @@ describe("restart recovery and resilient shutdown", () => {
       await f.queue.drain();
       expect(f.job()).toMatchObject({
         state: "trashed",
-        fingerprint: { size: 0, mtime: 5 },
+        fingerprint: { size: 1, mtime: 5 },
       });
       expect(f.statReads()).toBeGreaterThanOrEqual(4);
       expect(f.uploads()).toBe(1);
@@ -549,6 +635,59 @@ describe("restart recovery and resilient shutdown", () => {
     expect(f.uploads()).toBe(1);
     await f.controller.stop();
   });
+  it("reconciles an exact persisted source-change failure into a new hashed generation", async () => {
+    const f = setup(
+      true,
+      interrupted("failed", {
+        remoteUrl: "https://cdn.test/old-generation.png",
+        failure: {
+          code: "source-changed",
+          stage: "upload",
+          message: "The source changed during processing.",
+          retry: "safe",
+        },
+      }),
+    );
+    await f.store.hydrate();
+    // Metadata is deliberately unchanged; only the strong hash identifies the
+    // replacement and permits the processor to discard the old saved URL.
+    f.setSourceBytes([2]);
+    f.controller.start();
+    f.ready();
+    await f.controller.scanNow();
+    await f.queue.drain();
+
+    expect(f.uploadedBytes).toEqual([[2]]);
+    expect(f.job()).toMatchObject({
+      state: "trashed",
+      remoteUrl: "https://cdn.test/image.png",
+    });
+    expect(f.text.get(f.note)).toBe("![](<https://cdn.test/image.png>)");
+    await f.controller.stop();
+  });
+  it("migrates a legacy discovery-blocked safe failure through the current scanner", async () => {
+    const f = setup(
+      true,
+      interrupted("failed", {
+        failure: {
+          code: "discovery-blocked",
+          stage: "reference",
+          message: "Legacy scanner could not classify the reference.",
+          retry: "safe",
+        },
+      }),
+    );
+    await f.store.hydrate();
+    f.controller.start();
+    f.ready();
+    await f.controller.scanNow();
+    await f.queue.drain();
+
+    expect(f.uploads()).toBe(1);
+    expect(f.job().state).toBe("trashed");
+    expect(f.text.get(f.note)).toBe("![](<https://cdn.test/image.png>)");
+    await f.controller.stop();
+  });
   it("does not reset an actively owned upload during reconciliation", async () => {
     const f = setup();
     f.blockUpload();
@@ -572,6 +711,138 @@ describe("restart recovery and resilient shutdown", () => {
     await f.queue.drain();
     expect(f.job().state).toBe("uncertain");
     expect(f.uploads()).toBe(0);
+    await f.controller.stop();
+  });
+  it("recovers a durable deletion intent after its folder is removed from automatic policy", async () => {
+    const f = setup(
+      true,
+      interrupted("deleting", {
+        remoteUrl: "https://cdn.test/image.png",
+        rewrittenNotePaths: ["note.md"],
+        rewrittenReferenceCount: 1,
+      }),
+    );
+    await f.store.hydrate();
+    f.text.set(f.note, "![](<https://cdn.test/image.png>)");
+    f.caches.set(f.note, {});
+    f.settings.scanEntireVault = false;
+    f.settings.attachmentFolders = ["other"];
+
+    f.controller.start();
+    f.ready();
+    await f.controller.scanNow();
+    await f.queue.drain();
+
+    expect(f.job().state).toBe("trashed");
+    expect(f.trash).toEqual(["attachments/image.png"]);
+    expect(f.uploads()).toBe(0);
+    await f.controller.stop();
+  });
+  it("automatically resumes a safe persisted snapshot-cleanup failure", async () => {
+    const f = setup(
+      true,
+      interrupted("failed", {
+        remoteUrl: "https://cdn.test/image.png",
+        pendingSnapshotId:
+          "obsidian-picgo-2147483647-00000000-0000-4000-8000-000000000000",
+        failure: {
+          code: "snapshot-cleanup-failed",
+          stage: "upload",
+          message: "Cleanup is pending.",
+          retry: "safe",
+        },
+      }),
+    );
+    await f.store.hydrate();
+    f.controller.start();
+    f.ready();
+    await f.controller.scanNow();
+    await f.queue.drain();
+
+    expect(f.job().state).toBe("trashed");
+    expect(f.job().pendingSnapshotId).toBeUndefined();
+    expect(f.uploads()).toBe(0);
+    await f.controller.stop();
+  });
+  it("cleans an uncertain upload snapshot without retrying or changing uncertainty", async () => {
+    const snapshotId =
+      "obsidian-picgo-2147483647-00000000-0000-4000-8000-000000000001";
+    const f = setup(
+      true,
+      interrupted("uncertain", {
+        pendingSnapshotId: snapshotId,
+        failure: {
+          code: "snapshot-upload-failed",
+          stage: "upload",
+          message: "Upload completion is uncertain.",
+          retry: "uncertain",
+        },
+      }),
+    );
+    await f.store.hydrate();
+    f.settings.scanEntireVault = false;
+    f.settings.attachmentFolders = ["other"];
+    f.controller.start();
+    f.ready();
+    await f.controller.scanNow();
+    await f.queue.drain();
+
+    expect(f.job()).toMatchObject({
+      state: "uncertain",
+      failure: { retry: "uncertain" },
+    });
+    expect(f.job().pendingSnapshotId).toBeUndefined();
+    expect(await f.controller.retry(f.source.path)).toMatchObject({
+      ok: false,
+      error: { code: "not-retryable" },
+    });
+    expect(f.uploads()).toBe(0);
+    expect(f.writes).toEqual([]);
+    expect(f.trash).toEqual([]);
+    await f.controller.stop();
+  });
+  it("retains and retries only cleanup when an uncertain snapshot cannot be removed", async () => {
+    const snapshotId =
+      "obsidian-picgo-2147483647-00000000-0000-4000-8000-000000000002";
+    let cleanupAttempts = 0;
+    const f = setup(
+      true,
+      interrupted("uncertain", {
+        pendingSnapshotId: snapshotId,
+        failure: {
+          code: "snapshot-upload-failed",
+          stage: "upload",
+          message: "Upload completion is uncertain.",
+          retry: "uncertain",
+        },
+      }),
+      undefined,
+      {
+        initialize: async () => {},
+        remove: async () => {
+          cleanupAttempts++;
+          throw new Error("cleanup failed");
+        },
+      },
+    );
+    await f.store.hydrate();
+    f.controller.start();
+    f.ready();
+    await f.controller.scanNow();
+    await f.queue.drain();
+
+    expect(f.job()).toMatchObject({
+      state: "uncertain",
+      pendingSnapshotId: snapshotId,
+      failure: { retry: "uncertain" },
+    });
+    expect(cleanupAttempts).toBe(1);
+    await f.controller.scanNow();
+    await f.queue.drain();
+    expect(cleanupAttempts).toBe(2);
+    expect(f.uploads()).toBe(0);
+    expect(f.writes).toEqual([]);
+    expect(f.trash).toEqual([]);
     await f.controller.stop();
   });
   it("reconciliation retries a failed durable recovery without another upload", async () => {

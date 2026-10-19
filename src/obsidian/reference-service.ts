@@ -69,45 +69,79 @@ interface RefreshWatch {
   finish(result: RefreshResult): void;
 }
 
+const fallbackHtmlEntities: Record<string, string> = {
+  period: ".",
+  sol: "/",
+  bsol: "\\",
+  colon: ":",
+  quest: "?",
+  num: "#",
+  percnt: "%",
+  amp: "&",
+  AMP: "&",
+  equals: "=",
+  lowbar: "_",
+  hyphen: "-",
+  semi: ";",
+  lpar: "(",
+  rpar: ")",
+  lsqb: "[",
+  rsqb: "]",
+  lcub: "{",
+  rcub: "}",
+  comma: ",",
+  commat: "@",
+  plus: "+",
+  ast: "*",
+  excl: "!",
+  dollar: "$",
+  tilde: "~",
+  vert: "|",
+  quot: '"',
+  QUOT: '"',
+  apos: "'",
+  lt: "<",
+  gt: ">",
+  Tab: "\t",
+  NewLine: "\n",
+  nbsp: "\u00a0",
+};
+
+function decodeHtmlEntities(text: string): string {
+  let decoder: HTMLTextAreaElement | undefined;
+  if (typeof document !== "undefined") {
+    try {
+      decoder = document.createElement("textarea");
+    } catch {
+      /* The fallback still covers path punctuation in non-DOM environments. */
+    }
+  }
+  return text.replace(
+    /&#(?:x[\da-f]+|\d+);?|&([a-z][a-z\d]*);?/gi,
+    (match, name: string | undefined) => {
+      if (decoder) {
+        decoder.innerHTML = match;
+        if (decoder.value !== match) return decoder.value;
+      }
+      if (name === undefined) {
+        const hexadecimal = /^&#x/i.test(match);
+        const digits = match.slice(hexadecimal ? 3 : 2).replace(/;$/, "");
+        const point = parseInt(digits, hexadecimal ? 16 : 10);
+        return point > 0 &&
+          point <= 0x10ffff &&
+          !(point >= 0xd800 && point <= 0xdfff)
+          ? String.fromCodePoint(point)
+          : "\ufffd";
+      }
+      return Object.hasOwn(fallbackHtmlEntities, name)
+        ? fallbackHtmlEntities[name]!
+        : match;
+    },
+  );
+}
+
 /** Only used to find blockers, never to identify a replacement. */
 function searchableText(text: string): string {
-  const entities: Record<string, string> = {
-    period: ".",
-    sol: "/",
-    bsol: "\\",
-    colon: ":",
-    quest: "?",
-    num: "#",
-    percnt: "%",
-    amp: "&",
-    AMP: "&",
-    equals: "=",
-    lowbar: "_",
-    hyphen: "-",
-    semi: ";",
-    lpar: "(",
-    rpar: ")",
-    lsqb: "[",
-    rsqb: "]",
-    lcub: "{",
-    rcub: "}",
-    comma: ",",
-    commat: "@",
-    plus: "+",
-    ast: "*",
-    excl: "!",
-    dollar: "$",
-    tilde: "~",
-    vert: "|",
-    quot: '"',
-    QUOT: '"',
-    apos: "'",
-    lt: "<",
-    gt: ">",
-    Tab: "\t",
-    NewLine: "\n",
-    nbsp: "\u00a0",
-  };
   const decoded = text
     .replace(/\\u([\da-f]{4})/gi, (_match, code: string) =>
       String.fromCharCode(parseInt(code, 16)),
@@ -119,9 +153,7 @@ function searchableText(text: string): string {
           : parseInt(code, 10);
       return point <= 0x10ffff ? String.fromCodePoint(point) : match;
     })
-    .replace(/&([a-z][a-z\d]*);/gi, (match, name: string) =>
-      Object.hasOwn(entities, name) ? entities[name]! : match,
-    )
+    .replace(/&[a-z][a-z\d]*;?/gi, (match) => decodeHtmlEntities(match))
     .replace(/%(?:[\da-f]{2})(?:%[\da-f]{2})*/gi, (match) => {
       try {
         return decodeURIComponent(match);
@@ -131,6 +163,236 @@ function searchableText(text: string): string {
     })
     .replace(/\\([!"#$%&'()*+,\-./:;<=>?@[\]\\^_`{|}~])/g, "$1");
   return decoded.toLowerCase();
+}
+
+/** Decode CSS escapes only after a value is proven to be a CSS URL token.
+ * Applying CSS rules to arbitrary Markdown would reinterpret path separators. */
+function decodeCssEscapes(value: string): string {
+  let decoded = "";
+  for (let cursor = 0; cursor < value.length;) {
+    if (value[cursor] !== "\\") {
+      decoded += value[cursor]!;
+      cursor++;
+      continue;
+    }
+    cursor++;
+    if (cursor >= value.length) {
+      decoded += "\ufffd";
+      break;
+    }
+    if (value[cursor] === "\r" && value[cursor + 1] === "\n") {
+      cursor += 2;
+      continue;
+    }
+    if (["\n", "\r", "\f"].includes(value[cursor]!)) {
+      cursor++;
+      continue;
+    }
+    const hexadecimal = /^[\da-f]{1,6}/i.exec(value.slice(cursor))?.[0];
+    if (!hexadecimal) {
+      decoded += value[cursor]!;
+      cursor++;
+      continue;
+    }
+    cursor += hexadecimal.length;
+    const point = parseInt(hexadecimal, 16);
+    decoded +=
+      point === 0 || point > 0x10ffff || (point >= 0xd800 && point <= 0xdfff)
+        ? "\ufffd"
+        : String.fromCodePoint(point);
+    if (value[cursor] === "\r" && value[cursor + 1] === "\n") cursor += 2;
+    else if (/[ \t\r\n\f]/.test(value[cursor] ?? "")) cursor++;
+  }
+  return decoded;
+}
+
+const htmlUrlAttributes = new Set([
+  "action",
+  "archive",
+  "background",
+  "cite",
+  "classid",
+  "codebase",
+  "data",
+  "formaction",
+  "href",
+  "icon",
+  "imagesrcset",
+  "longdesc",
+  "manifest",
+  "poster",
+  "profile",
+  "src",
+  "srcset",
+  "usemap",
+  "xlink:href",
+]);
+
+interface TextReplacement {
+  start: number;
+  end: number;
+  value: string;
+}
+
+function replaceTextRanges(
+  content: string,
+  replacements: readonly TextReplacement[],
+): string {
+  let result = content;
+  for (const replacement of [...replacements].sort((a, b) => b.start - a.start))
+    result =
+      result.slice(0, replacement.start) +
+      replacement.value +
+      result.slice(replacement.end);
+  return result;
+}
+
+function normalizeSrcset(value: string): string {
+  const replacements: TextReplacement[] = [];
+  let cursor = 0;
+  while (cursor < value.length) {
+    while (/[\t\n\f\r ,]/.test(value[cursor] ?? "")) cursor++;
+    const start = cursor;
+    while (cursor < value.length && !/[\t\n\f\r ]/.test(value[cursor]!))
+      cursor++;
+    let end = cursor;
+    while (end > start && value[end - 1] === ",") end--;
+    if (isExternalDestination(value.slice(start, end)))
+      replacements.push({ start, end, value: " ".repeat(end - start) });
+    if (end < cursor) continue;
+
+    let parentheses = 0;
+    while (cursor < value.length) {
+      if (value[cursor] === "(") parentheses++;
+      else if (value[cursor] === ")")
+        parentheses = Math.max(0, parentheses - 1);
+      else if (value[cursor] === "," && parentheses === 0) {
+        cursor++;
+        break;
+      }
+      cursor++;
+    }
+  }
+  return replaceTextRanges(value, replacements);
+}
+
+/** Decode every URL-bearing HTML attribute and mask only values proven remote. */
+function normalizeHtmlUrlAttributes(content: string): string {
+  return content.replace(/<[a-z][^>]*>/gi, (tag: string) => {
+    const replacements: TextReplacement[] = [];
+    const attributes =
+      /([^\s"'=<>`]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/g;
+    let attribute: RegExpExecArray | null;
+    while ((attribute = attributes.exec(tag))) {
+      const name = attribute[1]!.toLowerCase();
+      if (!htmlUrlAttributes.has(name)) continue;
+      const raw = attribute[2] ?? attribute[3] ?? attribute[4] ?? "";
+      const decoded = decodeHtmlEntities(raw);
+      const normalized =
+        name === "srcset" || name === "imagesrcset"
+          ? normalizeSrcset(decoded)
+          : isExternalDestination(decoded.trim())
+            ? " ".repeat(decoded.length)
+            : decoded;
+      const relative = attribute[0].lastIndexOf(raw);
+      if (relative < 0) continue;
+      replacements.push({
+        start: attribute.index + relative,
+        end: attribute.index + relative + raw.length,
+        value: normalized,
+      });
+    }
+    return replaceTextRanges(tag, replacements);
+  });
+}
+
+function cssEscapeEnd(content: string, start: number): number {
+  let cursor = start + 1;
+  if (cursor >= content.length) return cursor;
+  if (content[cursor] === "\r" && content[cursor + 1] === "\n")
+    return cursor + 2;
+  if (["\n", "\r", "\f"].includes(content[cursor]!)) return cursor + 1;
+  const hexadecimal = /^[\da-f]{1,6}/i.exec(content.slice(cursor))?.[0];
+  if (!hexadecimal) return cursor + 1;
+  cursor += hexadecimal.length;
+  if (content[cursor] === "\r" && content[cursor + 1] === "\n")
+    return cursor + 2;
+  return /[ \t\r\n\f]/.test(content[cursor] ?? "") ? cursor + 1 : cursor;
+}
+
+function quotedCssValue(
+  content: string,
+  quoteIndex: number,
+): { start: number; end: number; next: number } | undefined {
+  const quote = content[quoteIndex];
+  let cursor = quoteIndex + 1;
+  while (cursor < content.length) {
+    if (content[cursor] === "\\") {
+      cursor = cssEscapeEnd(content, cursor);
+      continue;
+    }
+    if (content[cursor] === quote)
+      return { start: quoteIndex + 1, end: cursor, next: cursor + 1 };
+    cursor++;
+  }
+  return undefined;
+}
+
+function cssUrlValueRanges(content: string): TextReplacement[] {
+  const ranges: TextReplacement[] = [];
+  const urls = /\burl\s*\(/gi;
+  while (urls.exec(content) !== null) {
+    let cursor = urls.lastIndex;
+    while (/[ \t\r\n\f]/.test(content[cursor] ?? "")) cursor++;
+    let range: { start: number; end: number; next: number } | undefined;
+    if (content[cursor] === '"' || content[cursor] === "'") {
+      range = quotedCssValue(content, cursor);
+      if (!range) continue;
+      cursor = range.next;
+      while (/[ \t\r\n\f]/.test(content[cursor] ?? "")) cursor++;
+      if (content[cursor] !== ")") continue;
+      urls.lastIndex = cursor + 1;
+    } else {
+      const start = cursor;
+      while (cursor < content.length && content[cursor] !== ")") {
+        if (content[cursor] === "\\") cursor = cssEscapeEnd(content, cursor);
+        else cursor++;
+      }
+      if (content[cursor] !== ")") continue;
+      let end = cursor;
+      while (end > start && /[ \t\r\n\f]/.test(content[end - 1]!)) end--;
+      range = { start, end, next: cursor };
+      urls.lastIndex = cursor + 1;
+    }
+    ranges.push({ start: range.start, end: range.end, value: "" });
+  }
+  const imports = /@import\b/gi;
+  while (imports.exec(content) !== null) {
+    let cursor = imports.lastIndex;
+    while (/[ \t\r\n\f]/.test(content[cursor] ?? "")) cursor++;
+    if (content[cursor] !== '"' && content[cursor] !== "'") continue;
+    const range = quotedCssValue(content, cursor);
+    if (!range) continue;
+    ranges.push({ start: range.start, end: range.end, value: "" });
+    imports.lastIndex = range.next;
+  }
+  return ranges;
+}
+
+/** Decode CSS URL values losslessly enough for blocker detection, then remove
+ * only destinations that are independently proven HTTP(S). */
+function normalizeCssUrlTokens(content: string): string {
+  const replacements = cssUrlValueRanges(content).map((range) => {
+    const raw = content.slice(range.start, range.end);
+    const decoded = decodeCssEscapes(decodeHtmlEntities(raw));
+    return {
+      ...range,
+      value: isExternalDestination(decoded.trim())
+        ? " ".repeat(decoded.length)
+        : decoded,
+    };
+  });
+  return replaceTextRanges(content, replacements);
 }
 
 /** External Markdown images need no cache entry and must not make a retry look local. */
@@ -259,24 +521,46 @@ export class ObsidianReferenceService {
   }
 
   private hasPlausibleDependency(text: string, target: TFile): boolean {
-    const searchable = searchableText(text);
+    const searchable = searchableText(
+      normalizeCssUrlTokens(
+        normalizeHtmlUrlAttributes(maskExternalEmbeds(text)),
+      ),
+    );
     const stem = target.basename.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    // Remaining image markup has no proven supported resolution. In particular,
-    // reference-style IDs, HTML entities and extensionless wiki targets can hide
-    // the literal filename. False-positive retention is preferable to deletion.
+    const referenceBearing =
+      /!\[|\[\[|\]\s*\(|(?:^|\n)\s*\[[^\]\n]+\]:|<[a-z][^>]*>|\burl\s*\(|@import|\bbackground(?:-image)?\s*:/i.test(
+        searchable,
+      );
+    // Unknown entities may hide a target name, while extensionless image paths
+    // can name a target by basename. Unrelated broken or unsupported image syntax
+    // must not block every image in the Vault.
     return (
       searchable.includes(target.name.toLowerCase()) ||
-      // Unknown entities may encode arbitrary filename characters. Without a
-      // proven decoding, URL-bearing HTML/CSS must retain the local source.
-      (/&[a-z][a-z\d]*;?/i.test(searchable) &&
-        /<[a-z][^>]*>|\burl\s*\(|@import|\bbackground(?:-image)?\s*:/i.test(
-          searchable,
-        )) ||
-      /!\[|<(?:img|source|object|embed)\b/i.test(searchable) ||
       new RegExp(
         `\\[\\[\\s*(?:[^|#\\]\\n]*[/\\\\])?${stem}(?:[#|\\]]|$)`,
         "i",
-      ).test(searchable)
+      ).test(searchable) ||
+      (referenceBearing &&
+        new RegExp(
+          `(?:^|[/\\\\(<'"=:\\s])${stem}(?=[#?|'"\\)\\]}>\\s]|$)`,
+          "i",
+        ).test(searchable))
+    );
+  }
+
+  private destinationCouldNameTarget(
+    destination: string,
+    target: TFile,
+  ): boolean {
+    const searchable = searchableText(destination)
+      .trim()
+      .replace(/^<|>$/g, "")
+      .split(/[?#]/, 1)[0]!
+      .replace(/\\/g, "/");
+    const basename = searchable.slice(searchable.lastIndexOf("/") + 1);
+    return (
+      basename === target.name.toLowerCase() ||
+      basename === target.basename.toLowerCase()
     );
   }
 
@@ -294,23 +578,38 @@ export class ObsidianReferenceService {
     }
     const cache = this.metadata.getFileCache(file);
     if (!cache) {
-      plan.blockers.push(referenceFailure("missing-cache", file.path));
+      if (this.hasPlausibleDependency(content, target))
+        plan.blockers.push(referenceFailure("missing-cache", file.path));
       return;
     }
     for (const link of cache.links ?? []) {
       const destination = decodeDestination(link.link);
       if (!destination) {
-        plan.blockers.push(
-          referenceFailure("unresolved-destination", file.path),
-        );
+        if (
+          this.hasPlausibleDependency(link.original, target) ||
+          this.destinationCouldNameTarget(link.link, target)
+        )
+          plan.blockers.push(
+            referenceFailure("unresolved-destination", file.path),
+          );
         continue;
       }
-      if (
-        !isExternalDestination(destination) &&
-        this.metadata.getFirstLinkpathDest(destination, file.path) === target
-      )
+      if (isExternalDestination(destination)) continue;
+      const resolved = this.metadata.getFirstLinkpathDest(
+        destination,
+        file.path,
+      );
+      if (resolved === target)
         plan.blockers.push(
           referenceFailure("unsupported-dependency", file.path),
+        );
+      else if (
+        !resolved &&
+        (this.hasPlausibleDependency(link.original, target) ||
+          this.destinationCouldNameTarget(destination, target))
+      )
+        plan.blockers.push(
+          referenceFailure("unresolved-destination", file.path),
         );
     }
     const embeds = cache.embeds ?? [];
@@ -324,7 +623,15 @@ export class ObsidianReferenceService {
     }));
     const validation = applyVerifiedEdits(content, slices);
     if (!validation.ok) {
-      plan.blockers.push(validation.error);
+      if (
+        this.hasPlausibleDependency(content, target) ||
+        embeds.some(
+          (embed) =>
+            this.hasPlausibleDependency(embed.original, target) ||
+            this.hasPlausibleDependency(embed.link, target),
+        )
+      )
+        plan.blockers.push(validation.error);
       return;
     }
     const covered: RewriteEdit[] = [];
@@ -332,19 +639,29 @@ export class ObsidianReferenceService {
       const embed = embeds[index]!;
       const slice = slices[index]!;
       if (!hasSafeEmbedContext(content, slice.start)) {
-        plan.blockers.push(
-          referenceFailure("unsafe-markdown-context", file.path),
-        );
+        if (this.hasPlausibleDependency(embed.original, target))
+          plan.blockers.push(
+            referenceFailure("unsafe-markdown-context", file.path),
+          );
         continue;
       }
       const parsed = parseEmbed(embed.original);
       if (!parsed.ok) {
-        plan.blockers.push(referenceFailure("unsupported-syntax", file.path));
+        if (
+          this.hasPlausibleDependency(embed.original, target) ||
+          this.destinationCouldNameTarget(embed.link, target)
+        )
+          plan.blockers.push(referenceFailure("unsupported-syntax", file.path));
         continue;
       }
       const cachedDestination = decodeDestination(embed.link);
       if (cachedDestination !== parsed.value.destination) {
-        plan.blockers.push(referenceFailure("metadata-mismatch", file.path));
+        if (
+          this.hasPlausibleDependency(embed.original, target) ||
+          (cachedDestination !== null &&
+            this.destinationCouldNameTarget(cachedDestination, target))
+        )
+          plan.blockers.push(referenceFailure("metadata-mismatch", file.path));
         continue;
       }
       if (isExternalDestination(parsed.value.destination)) {
@@ -356,9 +673,13 @@ export class ObsidianReferenceService {
         file.path,
       );
       if (!resolved) {
-        plan.blockers.push(
-          referenceFailure("unresolved-destination", file.path),
-        );
+        if (
+          this.hasPlausibleDependency(embed.original, target) ||
+          this.destinationCouldNameTarget(parsed.value.destination, target)
+        )
+          plan.blockers.push(
+            referenceFailure("unresolved-destination", file.path),
+          );
         continue;
       }
       // Object identity is deliberate: a basename or even a reused path is not proof.

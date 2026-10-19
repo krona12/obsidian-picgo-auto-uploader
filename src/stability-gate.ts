@@ -147,7 +147,9 @@ export class StabilityGate {
           if (sample.size > settings.maxFileSizeBytes)
             return finish(fail("file-too-large"));
           const same =
-            previous?.size === sample.size && previous.mtime === sample.mtime;
+            previous?.size === sample.size &&
+            previous.mtime === sample.mtime &&
+            previous.sha256 === sample.sha256;
           matches = same ? matches + 1 : 1;
           delay =
             previous && !same
@@ -156,7 +158,11 @@ export class StabilityGate {
                   settings.stabilitySampleIntervalMs,
                 )
               : settings.stabilitySampleIntervalMs;
-          previous = { size: sample.size, mtime: sample.mtime };
+          previous = {
+            size: sample.size,
+            mtime: sample.mtime,
+            ...(sample.sha256 === undefined ? {} : { sha256: sample.sha256 }),
+          };
           if (matches >= settings.stabilitySamples)
             return finish({ ok: true, value: previous });
         }

@@ -1,4 +1,6 @@
 import type { CachedMetadata, EventRef, TFile, Vault } from "obsidian";
+import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { sanitizeSettings } from "../src/defaults";
 import {
   JobStore,
@@ -12,11 +14,18 @@ import {
   type ReferenceMetadata,
   type ReferenceVault,
 } from "../src/obsidian/reference-service";
-import { ObsidianVaultAdapter } from "../src/obsidian/vault-adapter";
+import {
+  ObsidianVaultAdapter,
+  type SnapshotMaintenance,
+} from "../src/obsidian/vault-adapter";
 import { AttachmentProcessor } from "../src/attachment-processor";
 import { UploadQueue } from "../src/upload-queue";
 
-export function fixture(initial?: JobSnapshot, storeOptions?: JobStoreOptions) {
+export function fixture(
+  initial?: JobSnapshot,
+  storeOptions?: JobStoreOptions,
+  snapshotMaintenance?: SnapshotMaintenance,
+) {
   const settings = sanitizeSettings({
     quietPeriodMs: 10,
     stabilitySampleIntervalMs: 1,
@@ -25,6 +34,7 @@ export function fixture(initial?: JobSnapshot, storeOptions?: JobStoreOptions) {
   });
   const files: TFile[] = [];
   const text = new Map<TFile, string>();
+  const binary = new Map<TFile, Uint8Array>();
   const caches = new Map<TFile, CachedMetadata>();
   type MetadataEventName = "changed" | "deleted" | "resolve" | "resolved";
   type MetadataEventCallback = (...args: unknown[]) => void;
@@ -40,22 +50,40 @@ export function fixture(initial?: JobSnapshot, storeOptions?: JobStoreOptions) {
   >();
   const readyListeners = new Set<() => void>();
   const writes: string[] = [];
-  const trash: string[] = [];
+  const deleted: string[] = [];
+  const legacyTrash: string[] = [];
   const checkpoints: JobSnapshot[] = [];
   let uploads = 0;
+  const uploadedSources: string[] = [];
+  const uploadedBytes: number[][] = [];
   let failNote = "";
   let failTrash = false;
+  let rejectDeleteAfterRemoval = false;
+  let leaveSourceAfterDelete = false;
   let refresh = true;
   let pendingUpload = false;
   let uploadAborted = false;
   let holdAbort = false;
   let releaseAbort: (() => void) | undefined;
+  let releaseUpload: (() => void) | undefined;
   let saveFailures = 0;
   let failLog = false;
   let statReads = 0;
   let statHook: (() => void) | undefined;
+  let binaryReads = 0;
+  let binaryReadHook: (() => void) | undefined;
+  let uploadRequestHook: (() => void) | undefined;
   let saveFailureState = "";
   let afterWrite: (() => void) | undefined;
+  let holdWorkerAfterProcess = false;
+  let reportWorkerAfterProcess!: () => void;
+  let releaseWorkerAfterProcess!: () => void;
+  const workerAfterProcess = new Promise<void>((resolve) => {
+    reportWorkerAfterProcess = resolve;
+  });
+  const workerRelease = new Promise<void>((resolve) => {
+    releaseWorkerAfterProcess = resolve;
+  });
   let response: PicGoTransportResult = {
     ok: true,
     value: {
@@ -67,6 +95,8 @@ export function fixture(initial?: JobSnapshot, storeOptions?: JobStoreOptions) {
     },
   };
   const vault: ReferenceVault & {
+    readBinary(file: TFile): Promise<ArrayBuffer>;
+    delete(file: TFile, force?: boolean): Promise<void>;
     trash(file: TFile, system: boolean): Promise<void>;
     on(name: VaultEventName, callback: VaultEventCallback): EventRef;
     offref(ref: EventRef): void;
@@ -76,6 +106,15 @@ export function fixture(initial?: JobSnapshot, storeOptions?: JobStoreOptions) {
     async read(file) {
       if (!text.has(file)) throw new Error("C:\\private\\missing");
       return text.get(file)!;
+    },
+    async readBinary(file) {
+      binaryReads++;
+      binaryReadHook?.();
+      const value = binary.get(file) ?? new Uint8Array();
+      return value.buffer.slice(
+        value.byteOffset,
+        value.byteOffset + value.byteLength,
+      ) as ArrayBuffer;
     },
     async process(file, transform) {
       if (file.path === failNote)
@@ -93,8 +132,17 @@ export function fixture(initial?: JobSnapshot, storeOptions?: JobStoreOptions) {
     async trash(file, system) {
       if (system !== false) throw new Error("Must use Vault trash");
       if (failTrash) throw new Error("C:\\private\\trash private-secret");
-      trash.push(file.path);
+      legacyTrash.push(file.path);
       files.splice(files.indexOf(file), 1);
+    },
+    async delete(file, force) {
+      if (force !== true) throw new Error("Must force permanent deletion");
+      if (failTrash) throw new Error("C:\\private\\delete private-secret");
+      if (leaveSourceAfterDelete) return;
+      deleted.push(file.path);
+      files.splice(files.indexOf(file), 1);
+      if (rejectDeleteAfterRemoval)
+        throw new Error("C:\\private\\delete-after-remove private-secret");
     },
     on(name, callback) {
       const ref = {};
@@ -136,6 +184,7 @@ export function fixture(initial?: JobSnapshot, storeOptions?: JobStoreOptions) {
     };
     files.push(file);
     text.set(file, content);
+    binary.set(file, new TextEncoder().encode(content));
     caches.set(file, {
       embeds: content
         ? [
@@ -153,6 +202,8 @@ export function fixture(initial?: JobSnapshot, storeOptions?: JobStoreOptions) {
     return file;
   }
   const source = add("attachments/image.png");
+  binary.set(source, new Uint8Array([1]));
+  source.stat.size = 1;
   const note = add("note.md", "![[attachments/image.png]]");
   const store = new JobStore(
     {
@@ -174,34 +225,58 @@ export function fixture(initial?: JobSnapshot, storeOptions?: JobStoreOptions) {
     },
     storeOptions,
   );
-  const adapter = new ObsidianVaultAdapter({
-    ...vault,
-    adapter: {
-      getFullPath: (path) => `C:\\private\\vault\\${path}`,
-      async stat(path) {
-        statReads++;
-        statHook?.();
-        const file = files.find((f) => f.path === path);
-        return file ? { ...file.stat, type: "file" as const } : null;
+  const adapter = new ObsidianVaultAdapter(
+    {
+      ...vault,
+      adapter: {
+        getFullPath: (path) => `C:\\private\\vault\\${path}`,
+        async stat(path) {
+          statReads++;
+          statHook?.();
+          const file = files.find((f) => f.path === path);
+          return file ? { ...file.stat, type: "file" as const } : null;
+        },
       },
+      on: vault.on,
+      offref: vault.offref,
     },
-    on: vault.on,
-    offref: vault.offref,
-  });
+    snapshotMaintenance,
+  );
   const client = new PicGoClient(settings, {
-    async request(_request, signal) {
+    async request(request, signal) {
       uploads++;
+      const body = JSON.parse(request.body ?? "{}") as { list?: unknown[] };
+      const uploadSource = body.list?.[0];
+      if (typeof uploadSource === "string") {
+        uploadedSources.push(uploadSource);
+        uploadedBytes.push(
+          existsSync(uploadSource) ? [...(await readFile(uploadSource))] : [],
+        );
+      }
+      uploadRequestHook?.();
       if (pendingUpload)
         return new Promise((resolve) => {
+          let settled = false;
+          const finish = (result: PicGoTransportResult) => {
+            if (settled) return;
+            settled = true;
+            signal?.removeEventListener("abort", abort);
+            releaseUpload = undefined;
+            resolve(result);
+          };
           const abort = () => {
             uploadAborted = true;
-            const finish = () =>
-              resolve({
+            const finishAbort = () =>
+              finish({
                 ok: false,
                 error: { kind: "aborted", dispatched: true },
               });
-            if (holdAbort) releaseAbort = finish;
-            else finish();
+            if (holdAbort) releaseAbort = finishAbort;
+            else finishAbort();
+          };
+          releaseUpload = () => {
+            pendingUpload = false;
+            finish(response);
           };
           signal?.addEventListener("abort", abort, { once: true });
           if (signal?.aborted) abort();
@@ -225,9 +300,13 @@ export function fixture(initial?: JobSnapshot, storeOptions?: JobStoreOptions) {
     client,
     references,
   });
-  const queue = new UploadQueue(store, (job, signal) =>
-    processor.process(job.vaultPath, signal),
-  );
+  const queue = new UploadQueue(store, async (job, signal) => {
+    await processor.process(job.vaultPath, signal);
+    if (holdWorkerAfterProcess) {
+      reportWorkerAfterProcess();
+      await workerRelease;
+    }
+  });
   const lifecycle = {
     onLayoutReady(callback: () => void) {
       readyListeners.add(callback);
@@ -245,6 +324,7 @@ export function fixture(initial?: JobSnapshot, storeOptions?: JobStoreOptions) {
     settings,
     files,
     text,
+    binary,
     caches,
     source,
     note,
@@ -257,7 +337,8 @@ export function fixture(initial?: JobSnapshot, storeOptions?: JobStoreOptions) {
     queue,
     lifecycle,
     writes,
-    trash,
+    trash: deleted,
+    legacyTrash,
     checkpoints,
     metadataListeners,
     eventListeners,
@@ -285,15 +366,35 @@ export function fixture(initial?: JobSnapshot, storeOptions?: JobStoreOptions) {
       }
     },
     uploads: () => uploads,
+    uploadedSources,
+    uploadedBytes,
     statReads: () => statReads,
+    binaryReads: () => binaryReads,
     statHook: (callback: () => void) => {
       statHook = callback;
+    },
+    binaryReadHook: (callback: () => void) => {
+      binaryReadHook = callback;
+    },
+    onUploadRequest: (callback: () => void) => {
+      uploadRequestHook = callback;
     },
     setRefresh: (value: boolean) => {
       refresh = value;
     },
     blockUpload: () => {
       pendingUpload = true;
+    },
+    releaseUpload: () => {
+      releaseUpload?.();
+    },
+    holdWorkerAfterProcess: () => {
+      holdWorkerAfterProcess = true;
+    },
+    workerAfterProcess: () => workerAfterProcess,
+    releaseWorkerAfterProcess: () => {
+      holdWorkerAfterProcess = false;
+      releaseWorkerAfterProcess();
     },
     uploadAborted: () => uploadAborted,
     holdUploadAbort: () => {
@@ -318,8 +419,17 @@ export function fixture(initial?: JobSnapshot, storeOptions?: JobStoreOptions) {
     failTrash: (value = true) => {
       failTrash = value;
     },
+    rejectDeleteAfterRemoval: (value = true) => {
+      rejectDeleteAfterRemoval = value;
+    },
+    leaveSourceAfterDelete: (value = true) => {
+      leaveSourceAfterDelete = value;
+    },
     afterWrite: (callback: () => void) => {
       afterWrite = callback;
+    },
+    setSourceBytes: (value: readonly number[]) => {
+      binary.set(source, Uint8Array.from(value));
     },
     job: () => store.snapshot().jobs[0]!,
     async run() {

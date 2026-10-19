@@ -17,8 +17,8 @@ Use red-green-refactor: add the smallest failing Vitest test, confirm the expect
 
 ## Mandatory safety invariants
 
-- The only local deletion operation is `Vault.trash(file, false)`.
-- Deletion requires a validated remote URL, a positive rewrite count, fresh clean reference verification, an unchanged source fingerprint, an active lifecycle, and exact source identity.
+- The only local deletion operation is `Vault.delete(file, true)`, reached through the processor's complete safety predicate. It is irreversible.
+- Deletion requires a validated remote URL, a positive rewrite count, fresh clean reference verification, an unchanged SHA-256 content fingerprint, an active lifecycle, exact source identity, and a durable `deleting` intent.
 - Orphans, ambiguity, unsupported references, timeout/disconnect, cancellation, and any failed gate retain the source.
 - An uncertain upload is never retried automatically.
 - Saved remote URLs are checkpointed before rewriting and reused after restart.

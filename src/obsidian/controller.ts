@@ -5,7 +5,7 @@ import type {
   PluginSettings,
   SourceFingerprint,
 } from "../domain";
-import { sameFingerprint } from "../attachment-processor";
+import { sameMetadata } from "../attachment-processor";
 import { isTerminalState, JobStore } from "../job-store";
 import { isEligibleAttachment, normalizeVaultPath } from "../path-policy";
 import { redactText } from "../redaction";
@@ -165,6 +165,10 @@ export class AutoUploaderController {
             .snapshot()
             .jobs.filter((job) => !isTerminalState(job.state))
             .map((job) => job.vaultPath),
+          ...this.dependencies.store
+            .snapshot()
+            .jobs.filter((job) => job.pendingSnapshotId !== undefined)
+            .map((job) => job.vaultPath),
         ]),
       ];
       for (const path of paths) {
@@ -176,17 +180,46 @@ export class AutoUploaderController {
           break;
         const previous = this.job(path);
         const eligible = isEligibleAttachment(path, this.dependencies.settings);
-        // An interrupted dispatch still needs uncertainty classification when
-        // configuration changed; this recovery can never start another upload.
-        if (!eligible && previous?.state !== "uploading") continue;
+        const uncertainSnapshotCleanup = Boolean(
+          previous?.pendingSnapshotId && previous.state === "uncertain",
+        );
+        const resumableSnapshotCleanup = Boolean(
+          previous?.pendingSnapshotId &&
+          previous.state !== "uncertain" &&
+          isTerminalState(previous.state) &&
+          previous.failure?.retry === "safe",
+        );
+        const resumableSafeFailure = Boolean(
+          previous?.state === "failed" &&
+          previous.failure?.retry === "safe" &&
+          ["source-changed", "discovery-blocked"].includes(
+            previous.failure.code,
+          ),
+        );
+        // Interrupted uploads still need uncertainty classification, and a
+        // durable deletion intent must finish even if current policy changed.
+        // Neither recovery path can start another upload.
+        if (
+          !eligible &&
+          previous?.state !== "uploading" &&
+          previous?.state !== "deleting" &&
+          !uncertainSnapshotCleanup &&
+          !resumableSnapshotCleanup
+        )
+          continue;
         if (eligible) result.eligible++;
-        const enqueued =
-          previous?.state === "trashed"
-            ? await this.dependencies.queue.enqueueNewGeneration(path)
-            : previous?.state === "skipped" &&
-                previous.failure?.code === "orphan"
+        const enqueued = resumableSnapshotCleanup
+          ? await this.dependencies.queue.retry(path)
+          : uncertainSnapshotCleanup
+            ? await this.dependencies.queue.cleanupUncertainSnapshot(path)
+            : resumableSafeFailure
               ? await this.dependencies.queue.retry(path)
-              : await this.dependencies.queue.recover(path);
+              : previous?.state === "trashed"
+                ? await this.dependencies.queue.enqueueNewGeneration(path)
+                : previous?.state === "skipped" &&
+                    previous.failure?.code === "orphan"
+                  ? await this.dependencies.queue.retry(path)
+                  : await this.dependencies.queue.recover(path);
         if (!enqueued.ok) result.failed++;
         else if (enqueued.value === "enqueued") result.enqueued++;
       }
@@ -281,29 +314,39 @@ export class AutoUploaderController {
       generation === this.generation &&
       cancellation === this.cancellation &&
       this.dependencies.settings.enabled;
-    if (!active()) return;
-    const job = this.job(path);
-    if (job && isTerminalState(job.state)) {
-      if (job.state === "trashed") {
-        const fingerprint = await this.dependencies.lifecycle.stat(path);
-        if (active() && fingerprint)
-          await this.dependencies.queue.enqueueNewGeneration(path);
-        return;
-      }
-      if (
-        job.state === "uncertain" ||
-        job.failure?.retry !== "safe" ||
-        !job.fingerprint
-      )
-        return;
-      const fingerprint = await this.dependencies.lifecycle.stat(path);
-      if (
-        !active() ||
-        !fingerprint ||
-        sameFingerprint(fingerprint, job.fingerprint)
-      )
-        return;
-      await this.dependencies.queue.retry(path);
-    } else if (active()) await this.dependencies.queue.enqueue(path);
+    let dirty = false;
+    while (active()) {
+      const job = this.job(path);
+      let enqueued: EnqueueResult;
+      if (job && isTerminalState(job.state)) {
+        if (job.state === "trashed") {
+          const fingerprint = await this.dependencies.lifecycle.stat(path);
+          if (!active() || !fingerprint) return;
+          enqueued = await this.dependencies.queue.enqueueNewGeneration(path);
+        } else {
+          if (job.state === "uncertain" || job.failure?.retry !== "safe")
+            return;
+          const fingerprint = await this.dependencies.lifecycle.stat(path);
+          if (!active() || !fingerprint) return;
+          const cleanupPending = job.pendingSnapshotId !== undefined;
+          const reserved = this.dependencies.queue.hasReservation(path);
+          if (
+            !dirty &&
+            !reserved &&
+            !cleanupPending &&
+            (!job.fingerprint || sameMetadata(fingerprint, job.fingerprint))
+          )
+            return;
+          enqueued = await this.dependencies.queue.retry(path);
+        }
+      } else if (job && job.state !== "queued")
+        enqueued = await this.dependencies.queue.recover(path);
+      else enqueued = await this.dependencies.queue.enqueue(path);
+      if (!enqueued.ok || enqueued.value !== "duplicate") return;
+      // The event arrived while this path already had an owner. Re-evaluate the
+      // durable result after that exact worker settles, even if metadata stayed equal.
+      dirty = true;
+      await this.dependencies.queue.waitForPath(path);
+    }
   }
 }

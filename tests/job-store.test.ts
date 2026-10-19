@@ -47,6 +47,7 @@ describe("durable job store", () => {
       "uploading",
       "rewriting",
       "verifying",
+      "deleting",
       "trashed",
     ] as const)
       await store.transition("attachments/a.png", state);
@@ -56,6 +57,95 @@ describe("durable job store", () => {
     await expect(
       store.transition("attachments/a.png", "uploading"),
     ).rejects.toThrow();
+  });
+
+  it("preserves a durable deletion intent during interrupted recovery", async () => {
+    const persistence = memory({
+      jobs: [
+        {
+          ...job("attachments/a.png", "deleting"),
+          remoteUrl: "https://cdn.test/a.png",
+          fingerprint: {
+            size: 1,
+            mtime: 2,
+            sha256: "a".repeat(64),
+          },
+          rewrittenNotePaths: ["note.md"],
+          rewrittenReferenceCount: 1,
+        },
+      ],
+      logs: [],
+    });
+    const store = new JobStore(persistence);
+    await store.hydrate();
+    await expect(
+      store.recoverInterrupted("attachments/a.png"),
+    ).resolves.toMatchObject({ state: "deleting" });
+    expect(store.snapshot().jobs[0]?.state).toBe("deleting");
+  });
+
+  it("clears only the exact persisted snapshot cleanup checkpoint", async () => {
+    const store = new JobStore(memory());
+    await store.upsert({
+      ...job(),
+      pendingSnapshotId:
+        "obsidian-picgo-123-00000000-0000-4000-8000-000000000000",
+    });
+    await expect(
+      store.completeSnapshotCleanup("attachments/a.png", "wrong"),
+    ).rejects.toThrow();
+    const withoutCheckpoint = { ...store.snapshot().jobs[0]! };
+    delete withoutCheckpoint.pendingSnapshotId;
+    await store.upsert(withoutCheckpoint);
+    expect(store.snapshot().jobs[0]?.pendingSnapshotId).toBe(
+      "obsidian-picgo-123-00000000-0000-4000-8000-000000000000",
+    );
+    await expect(
+      store.upsert({
+        ...store.snapshot().jobs[0]!,
+        pendingSnapshotId:
+          "obsidian-picgo-124-00000000-0000-4000-8000-000000000000",
+      }),
+    ).rejects.toThrow();
+    await store.completeSnapshotCleanup(
+      "attachments/a.png",
+      "obsidian-picgo-123-00000000-0000-4000-8000-000000000000",
+    );
+    expect(store.snapshot().jobs[0]?.pendingSnapshotId).toBeUndefined();
+  });
+
+  it("atomically starts a new generation only for proven different content", async () => {
+    const store = new JobStore(memory(), { now: () => 50 });
+    await store.upsert(job());
+    await store.transition("attachments/a.png", "waiting-stable");
+    await store.transition("attachments/a.png", "discovering-references");
+    await store.upsert({
+      ...store.snapshot().jobs[0]!,
+      remoteUrl: "https://cdn.test/old.png",
+      fingerprint: { size: 1, mtime: 2, sha256: "a".repeat(64) },
+      rewrittenNotePaths: ["old.md"],
+      rewrittenReferenceCount: 1,
+    });
+
+    await expect(
+      store.resetChangedSourceGeneration("attachments/a.png", "b".repeat(64), {
+        size: 1,
+        mtime: 2,
+        sha256: "c".repeat(64),
+      }),
+    ).rejects.toThrow();
+    await store.resetChangedSourceGeneration(
+      "attachments/a.png",
+      "a".repeat(64),
+      { size: 1, mtime: 2, sha256: "b".repeat(64) },
+    );
+
+    expect(store.snapshot().jobs[0]).toEqual({
+      ...job("attachments/a.png", "discovering-references"),
+      createdAt: 50,
+      updatedAt: 50,
+      fingerprint: { size: 1, mtime: 2, sha256: "b".repeat(64) },
+    });
   });
 
   // Break: jumping over upload without a durable URL, or losing resumable metadata on retry/restart.

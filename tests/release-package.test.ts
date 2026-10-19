@@ -120,7 +120,7 @@ describe("release identity", () => {
     const versions = json<Record<string, string>>("versions.json");
 
     expect(pkg.version).toMatch(stableSemver);
-    expect(pkg.version).toBe("0.1.1");
+    expect(pkg.version).toBe("0.1.2");
     expect(manifest).toMatchObject({
       id: "picgo-auto-uploader",
       name: "PicGo Auto Uploader",
@@ -184,12 +184,15 @@ describe("repository release files", () => {
             /orphan.*neither uploaded nor deleted/is,
             /timeout.*disconnect.*uncertain/is,
             /not automatically retried/i,
-            /saved remote URL.*without another upload/is,
-            /unchanged.*fingerprint/i,
+            /saved URL.*same content hash/is,
+            /temporary snapshot/i,
+            /SHA-256/,
+            /deleting.*intent/is,
             /exact source identity/i,
-            /Vault.*\.trash/is,
-            /restore.*\.trash/is,
-            /file history/i,
+            /Vault\.delete\(file, true\)/i,
+            /permanently delete/is,
+            /restore.*backup.*sync history.*file-history/is,
+            /file[- ]history/i,
             /duplicate remote image/i,
             /absolute Windows.*path/i,
             /optional bearer secret/i,
@@ -219,11 +222,14 @@ describe("repository release files", () => {
             /孤立.*既不会上传.*也不会删除/s,
             /超时.*断开.*不确定/s,
             /不会自动重试/,
-            /已保存.*远程 URL.*不会再次上传/s,
-            /指纹.*未变化/s,
+            /内容哈希.*已保存的 URL/s,
+            /临时快照/,
+            /SHA-256/,
+            /deleting.*删除意图/s,
             /源文件身份/,
-            /Vault.*\.trash/is,
-            /从.*\.trash.*恢复/s,
+            /Vault\.delete\(file, true\)/i,
+            /永久删除/,
+            /备份.*同步历史.*文件历史/s,
             /文件历史/,
             /重复的远程图片/,
             /Windows.*绝对路径/s,
@@ -349,8 +355,8 @@ describe("release package", () => {
   });
 
   test("rejects mismatched and v-prefixed tags without replacing valid assets", () => {
-    expectFailedWithoutReplacing(["--tag", "0.1.2"]);
-    expectFailedWithoutReplacing(["--tag", "v0.1.1"]);
+    expectFailedWithoutReplacing(["--tag", "0.1.3"]);
+    expectFailedWithoutReplacing(["--tag", "v0.1.2"]);
   });
 });
 
