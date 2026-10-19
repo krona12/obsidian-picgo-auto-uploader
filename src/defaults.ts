@@ -6,6 +6,7 @@ export const DEFAULT_SETTINGS: Readonly<PluginSettings> = Object.freeze({
   picgoOrigin: "http://127.0.0.1:36677",
   picgoSecret: "",
   allowInsecureHttp: false,
+  scanEntireVault: true,
   attachmentFolders: ["attachments"],
   allowedExtensions: [
     "png",
@@ -98,6 +99,7 @@ const rules: Rules = {
       ? input
       : undefined,
   allowInsecureHttp: boolean,
+  scanEntireVault: boolean,
   attachmentFolders: folders,
   allowedExtensions: extensions,
   quietPeriodMs: integer(0),

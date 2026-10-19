@@ -13,6 +13,7 @@ describe("settings policy", () => {
       picgoOrigin: "http://127.0.0.1:36677",
       picgoSecret: "",
       allowInsecureHttp: false,
+      scanEntireVault: true,
       attachmentFolders: ["attachments"],
       allowedExtensions: [
         "png",
@@ -86,6 +87,15 @@ describe("settings policy", () => {
     expect(
       sanitizeSettings({ picgoOrigin: "http://example.com" }).picgoOrigin,
     ).toBe("http://127.0.0.1:36677");
+  });
+
+  it("migrates existing settings to Vault-wide discovery and preserves an explicit folder-only choice", () => {
+    expect(
+      sanitizeSettings({ attachmentFolders: ["attachments"] }),
+    ).toMatchObject({ scanEntireVault: true });
+    expect(sanitizeSettings({ scanEntireVault: false })).toMatchObject({
+      scanEntireVault: false,
+    });
   });
 
   // Breaks caught: invalid folder configuration broadens scanning to the Vault root or reserved data.

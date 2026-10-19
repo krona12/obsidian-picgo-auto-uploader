@@ -20,8 +20,12 @@ const english = {
   "settings.test": "Test connection",
   "settings.testSuccess": "PicGo is reachable.",
   "settings.testFailure": "PicGo is unavailable.",
+  "settings.scanEntireVault": "Scan the entire Vault",
+  "settings.scanEntireVaultDesc":
+    "Consider images in any normal Vault folder. Only referenced images are uploaded; hidden folders and Vault trash stay excluded. Turn this off to use the folder list below.",
   "settings.folders": "Attachment folders",
-  "settings.foldersDesc": "One Vault-relative folder per line.",
+  "settings.foldersDesc":
+    "Fallback scope when entire-Vault scanning is off. One Vault-relative folder per line.",
   "settings.extensions": "Image extensions",
   "settings.extensionsDesc": "Comma-separated extensions.",
   "settings.maxSize": "Maximum file size (MiB)",
@@ -86,7 +90,7 @@ const english = {
   "statusbar.ready": "Uploader ready",
   "statusbar.open": "Open PicGo Auto Uploader status",
   "command.open": "Open PicGo Auto Uploader status",
-  "command.scan": "Scan attachment folders now",
+  "command.scan": "Scan referenced images now",
   "command.retry": "Retry failed uploads",
   "notice.openSettingsFailed":
     "Open Obsidian settings and select PicGo Auto Uploader.",
@@ -133,8 +137,12 @@ const chinese: Record<TranslationKey, string> = {
   "settings.test": "测试连接",
   "settings.testSuccess": "PicGo 可以访问。",
   "settings.testFailure": "PicGo 无法访问。",
+  "settings.scanEntireVault": "扫描整个仓库",
+  "settings.scanEntireVaultDesc":
+    "检查仓库普通目录中的所有图片，但只上传被 Markdown 引用的图片；隐藏目录和仓库回收站始终排除。关闭后使用下方文件夹列表限制范围。",
   "settings.folders": "附件文件夹",
-  "settings.foldersDesc": "每行一个仓库相对路径。",
+  "settings.foldersDesc":
+    "关闭“扫描整个仓库”时使用的范围；每行一个仓库相对路径。",
   "settings.extensions": "图片扩展名",
   "settings.extensionsDesc": "使用逗号分隔扩展名。",
   "settings.maxSize": "最大文件大小（MiB）",
@@ -198,7 +206,7 @@ const chinese: Record<TranslationKey, string> = {
   "statusbar.ready": "上传器已就绪",
   "statusbar.open": "打开 PicGo 自动上传状态",
   "command.open": "Open PicGo Auto Uploader status",
-  "command.scan": "Scan attachment folders now",
+  "command.scan": "Scan referenced images now",
   "command.retry": "Retry failed uploads",
   "notice.openSettingsFailed":
     "请打开 Obsidian 设置并选择 PicGo Auto Uploader。",

@@ -40,6 +40,7 @@ export function isEligibleAttachment(
   if (!normalized || normalized.split("/").some((part) => part.startsWith(".")))
     return false;
   if (
+    !settings.scanEntireVault &&
     !settings.attachmentFolders.some((folder) =>
       isPathInsideFolder(normalized, folder),
     )

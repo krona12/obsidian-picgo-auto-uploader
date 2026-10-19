@@ -120,7 +120,7 @@ describe("release identity", () => {
     const versions = json<Record<string, string>>("versions.json");
 
     expect(pkg.version).toMatch(stableSemver);
-    expect(pkg.version).toBe("0.1.0");
+    expect(pkg.version).toBe("0.1.1");
     expect(manifest).toMatchObject({
       id: "picgo-auto-uploader",
       name: "PicGo Auto Uploader",
@@ -202,8 +202,9 @@ describe("repository release files", () => {
             /unknown plugin data.*not detected.*not protected/is,
             /main\.js.*manifest\.json.*styles\.css/is,
             /source ZIP/i,
+            /Vault-wide discovery.*enabled by default/is,
             /Open PicGo Auto Uploader status/i,
-            /Scan attachment folders now/i,
+            /Scan referenced images now/i,
             /Retry failed uploads/i,
           ]
         : [
@@ -236,8 +237,9 @@ describe("repository release files", () => {
             /未知插件数据.*无法检测.*不受保护/s,
             /main\.js.*manifest\.json.*styles\.css/is,
             /源码 ZIP/,
+            /默认启用全仓库扫描/,
             /Open PicGo Auto Uploader status/,
-            /Scan attachment folders now/,
+            /Scan referenced images now/,
             /Retry failed uploads/,
           ];
     for (const disclosure of disclosures)
@@ -347,8 +349,8 @@ describe("release package", () => {
   });
 
   test("rejects mismatched and v-prefixed tags without replacing valid assets", () => {
-    expectFailedWithoutReplacing(["--tag", "0.1.1"]);
-    expectFailedWithoutReplacing(["--tag", "v0.1.0"]);
+    expectFailedWithoutReplacing(["--tag", "0.1.2"]);
+    expectFailedWithoutReplacing(["--tag", "v0.1.1"]);
   });
 });
 

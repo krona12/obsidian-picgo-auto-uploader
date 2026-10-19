@@ -205,7 +205,7 @@ export default class PicGoAutoUploaderPlugin extends Plugin {
       if (!this.isActive(generation)) return;
       this.addCommand({
         id: "scan-now",
-        name: "Scan attachment folders now",
+        name: "Scan referenced images now",
         callback: () =>
           void this.safeAction(() => this.current().controller.scanNow()),
       });

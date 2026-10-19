@@ -5,6 +5,7 @@ export interface PluginSettings {
   picgoOrigin: string;
   picgoSecret: string;
   allowInsecureHttp: boolean;
+  scanEntireVault: boolean;
   attachmentFolders: string[];
   allowedExtensions: string[];
   quietPeriodMs: number;

@@ -44,8 +44,10 @@ describe("Vault path policy", () => {
     expect(isPathInsideFolder(path, folder)).toBe(expected);
   });
 
-  // Breaks caught: trash/plugin data, unsupported extensions, or out-of-scope paths enter processing.
+  // Breaks caught: trash/plugin data or unsupported extensions enter processing.
   it.each([
+    ["root-image.png", true],
+    ["journal/assets/root-image.png", true],
     ["attachments/a.png", true],
     ["attachments/a.JPG", true],
     ["attachments/照片 1.avif", true],
@@ -54,20 +56,22 @@ describe("Vault path policy", () => {
     ["attachments/.trash/a.png", false],
     ["attachments/.obsidian/a.png", false],
     [".trash/a.png", false],
-    ["attachments-old/a.png", false],
+    ["attachments-old/a.png", true],
     ["attachments/../a.png", false],
   ])("eligibility of %j is %j", (path, expected) => {
     expect(isEligibleAttachment(path, DEFAULT_SETTINGS)).toBe(expected);
   });
 
-  it("honors configured Unicode folders and extensions", () => {
+  it("can restrict candidates to configured Unicode folders", () => {
     const settings = {
       ...DEFAULT_SETTINGS,
+      scanEntireVault: false,
       attachmentFolders: ["附件"],
       allowedExtensions: ["svg"],
     };
     expect(isEligibleAttachment("附件/旅行 照片.svg", settings)).toBe(true);
     expect(isEligibleAttachment("附件/旅行 照片.png", settings)).toBe(false);
+    expect(isEligibleAttachment("其他/旅行 照片.svg", settings)).toBe(false);
   });
 
   it.each([

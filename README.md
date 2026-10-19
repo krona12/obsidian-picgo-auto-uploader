@@ -4,7 +4,7 @@
 
 PicGo Auto Uploader is a safety-first Obsidian plugin for converting synced local image attachments into PicGo-hosted Markdown embeds. It is Windows desktop only, requires Obsidian 1.7.2 or later, and runs only while Obsidian is open.
 
-The plugin watches configured attachment folders, waits for each file to stop changing, uploads referenced images one at a time, rewrites every supported Markdown embed, verifies the result, and then moves the source to the Vault trash. Uncertainty always preserves the local file.
+The plugin scans supported images across the Vault, waits for each file to stop changing, uploads only images that are actually referenced, rewrites every supported Markdown embed, verifies the result, and then moves the source to the Vault trash. Hidden folders and the Vault trash are excluded. Uncertainty always preserves the local file.
 
 ## Requirements
 
@@ -17,7 +17,7 @@ The PicGo `POST /heartbeat` endpoint is used only by **Test connection**. Each a
 
 ## How it works
 
-1. A startup scan, create/modify events, and a five-minute reconciliation scan find eligible files in configured attachment folders.
+1. A startup scan, create/modify events, and a five-minute reconciliation scan find eligible images across normal Vault folders. Vault-wide discovery is enabled by default and can be limited to configured attachment folders.
 2. The file must pass the extension/size rules and remain unchanged for the configured stability observations.
 3. Obsidian metadata must resolve at least one supported image embed to the exact source file. An orphan is neither uploaded nor deleted.
 4. The absolute Windows source path is sent to PicGo. The response must contain one validated `http:` or `https:` URL.
@@ -29,7 +29,7 @@ Uploads are sequential. A timeout or disconnect after dispatch is marked `uncert
 
 ## Supported content
 
-The default attachment folder is `attachments`. Eligible extensions are exactly `png`, `jpg`, `jpeg`, `gif`, `webp`, `bmp`, `svg`, and `avif`. Both the folders and the allowed subset of extensions are configurable.
+Vault-wide discovery is enabled by default, so a root-level image such as `root-image.png` can be found before its Markdown references are checked. Hidden path segments such as `.obsidian` and `.trash` are always excluded. Turn off **Scan the entire Vault** to restrict discovery to the configured attachment folders; the default fallback folder is `attachments`. Eligible extensions are exactly `png`, `jpg`, `jpeg`, `gif`, `webp`, `bmp`, `svg`, and `avif`.
 
 Supported image embeds include:
 
@@ -45,7 +45,7 @@ The target must resolve to the exact attachment in the source note's context. Th
 
 Within Markdown files, HTML `<img>`, reference-style/block links, malformed embeds, and other plausible raw dependencies are not rewritten but do block deletion. In addition to Markdown, only `.canvas`, `.base`, and `.html` files are scanned conservatively for a plausible path or file-name dependency; a match blocks deletion.
 
-Other formats, including Excalidraw and unknown plugin data, are not interpreted or scanned in 0.1.0. References stored only in unknown plugin data are not detected and are not protected by the deletion check. Do not enable automatic processing for attachments relied on only by such formats; keep backups and test with a small folder. Missing/stale Markdown metadata, unreadable protected files, overlapping offsets, or concurrent edits also leave the source in place.
+Other formats, including Excalidraw and unknown plugin data, are not interpreted or scanned in 0.1.1. References stored only in unknown plugin data are not detected and are not protected by the deletion check. Do not enable automatic processing for attachments relied on only by such formats; keep backups and test with a small folder. Missing/stale Markdown metadata, unreadable protected files, overlapping offsets, or concurrent edits also leave the source in place.
 
 ## Deletion safety
 
@@ -64,22 +64,22 @@ Any upload, rewrite, verification, fingerprint, lifecycle, or trash error retain
 
 The plugin reads eligible Vault images, Markdown notes, and Obsidian metadata. It sends the absolute Windows source path and, when configured, an optional bearer secret only to the configured PicGo endpoint. PicGo then reads the image and sends its bytes to the image provider selected by the user.
 
-Version 0.1.0 has no telemetry and performs no returned-URL probe. It does not contact an analytics service. Logs and exported diagnostics redact configured secrets and absolute paths; they do not contain image bytes or arbitrary PicGo response bodies.
+Version 0.1.1 has no telemetry and performs no returned-URL probe. It does not contact an analytics service. Logs and exported diagnostics redact configured secrets and absolute paths; they do not contain image bytes or arbitrary PicGo response bodies.
 
-To remain compatible with Obsidian 1.7.2, version 0.1.0 does not rely on newer SecretStorage APIs. The optional secret is plaintext in this plugin's local `data.json`; syncing that file can expose it. Exclude `.obsidian/plugins/picgo-auto-uploader/data.json` from synchronization or do not store a secret if that risk is unacceptable.
+To remain compatible with Obsidian 1.7.2, version 0.1.1 does not rely on newer SecretStorage APIs. The optional secret is plaintext in this plugin's local `data.json`; syncing that file can expose it. Exclude `.obsidian/plugins/picgo-auto-uploader/data.json` from synchronization or do not store a secret if that risk is unacceptable.
 
 Plain HTTP is safe from passive network observers only when it stays on the local machine. A non-loopback HTTP endpoint exposes paths and credentials on the network, so the settings page requires explicit acknowledgement. Prefer loopback or HTTPS.
 
 ## Settings and status center
 
-Open **Settings → Community plugins → PicGo Auto Uploader** to configure automation, PicGo address/secret, folders, extensions, size limit, timing, and history retention. Invalid settings are not activated. **Test connection** calls only `POST /heartbeat`.
+Open **Settings → Community plugins → PicGo Auto Uploader** to configure automation, Vault-wide or folder-only discovery, PicGo address/secret, extensions, size limit, timing, and history retention. Invalid settings are not activated. **Test connection** calls only `POST /heartbeat`.
 
 Use the ribbon icon, status bar, or command palette to open the non-persistent status center. It shows PicGo reachability, automation state, queue/history, last scan, last successful conversion, redacted failures, and safe actions. It can scan now, retry safe failures, require confirmation for uncertain retries, cancel pending work, clear completed history, and export redacted diagnostics.
 
 Commands are named exactly:
 
 - `Open PicGo Auto Uploader status`
-- `Scan attachment folders now`
+- `Scan referenced images now`
 - `Retry failed uploads`
 
 ## Recovery
@@ -109,7 +109,7 @@ Start PicGo, enable its HTTP server, confirm the port, and use **Test connection
 
 ### An image was skipped
 
-Confirm that it is inside a configured folder, uses an enabled extension, is below the size limit, and has a supported Markdown image embed. Orphans and ambiguous references are intentionally retained.
+Confirm that Vault-wide discovery is enabled (or that the image is inside a configured fallback folder), the extension is enabled, the file is below the size limit, and it has a supported Markdown image embed. Orphans and ambiguous references are intentionally retained.
 
 ### A job is uncertain
 

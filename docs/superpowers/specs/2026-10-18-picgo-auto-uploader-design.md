@@ -4,7 +4,7 @@
 
 Build a production-ready, Windows desktop-only Obsidian plugin that converts locally synced attachment images into remote PicGo-hosted images without breaking notes or deleting recoverable data.
 
-The plugin scans configured attachment folders when Obsidian is ready, watches for newly created or modified images, waits until each file is stable, uploads it through the local PicGo HTTP service, rewrites every supported Markdown image embed that resolves to that file, verifies that no supported local reference remains, and only then moves the local image into the Vault's `.trash` folder.
+The plugin scans supported images across normal Vault folders when Obsidian is ready, watches for newly created or modified images, waits until each file is stable, uploads it through the local PicGo HTTP service only when a Markdown reference resolves to it, rewrites every supported embed, verifies that no supported local reference remains, and only then moves the local image into the Vault's `.trash` folder. Users can switch to a configured-folder-only scope.
 
 The public project will live at `krona12/obsidian-picgo-auto-uploader` and ship as `PicGo Auto Uploader` with plugin ID `picgo-auto-uploader`.
 
@@ -15,15 +15,15 @@ The public project will live at `krona12/obsidian-picgo-auto-uploader` and ship 
 3. **Deletion is recoverable.** The plugin uses `Vault.trash(file, false)` and never permanently deletes attachment files.
 4. **No duplicate work inside the plugin.** A normalized Vault path can have at most one active job. A saved remote URL is reused after a restart or rewrite failure.
 5. **The plugin is inspectable.** Queue state, history, failures, and actions are visible in a native Obsidian status center; logs never contain secrets or image contents.
-6. **No telemetry.** The plugin contacts only the configured PicGo endpoint and, optionally, the returned image URL when the user explicitly enables remote verification in a future release. Version 0.1.0 performs no remote URL probe.
+6. **No telemetry.** The plugin contacts only the configured PicGo endpoint and, optionally, the returned image URL when the user explicitly enables remote verification in a future release. Version 0.1.1 performs no remote URL probe.
 
 ## Scope
 
-### Version 0.1.0 includes
+### Version 0.1.1 includes
 
 - Windows desktop Obsidian support, `minAppVersion` 1.7.2, `isDesktopOnly: true`.
 - Startup scan, Vault create/modify event handling, and a five-minute reconciliation scan.
-- Configurable Vault-relative attachment folders, defaulting to `attachments`.
+- Vault-wide discovery by default, with configurable Vault-relative attachment folders as an opt-in restricted scope (default fallback: `attachments`).
 - Supported image extensions: `png`, `jpg`, `jpeg`, `gif`, `webp`, `bmp`, `svg`, and `avif`.
 - A configurable 3-second quiet period, two stable observations 2 seconds apart, a 60-second stability timeout, and a configurable 50 MiB file-size limit.
 - Sequential uploads to `http://127.0.0.1:36677/upload` using JSON `{ "list": [absolutePath] }`.
@@ -35,7 +35,7 @@ The public project will live at `krona12/obsidian-picgo-auto-uploader` and ship 
 - Simplified Chinese and English UI copy selected from Obsidian's current Moment locale.
 - README, Chinese README, MIT license, contribution/security documents, CI, release workflow, and distributable release assets.
 
-### Explicitly out of scope for version 0.1.0
+### Explicitly out of scope for version 0.1.1
 
 - Running when Obsidian is closed.
 - Mobile execution.
@@ -55,11 +55,11 @@ Three approaches were considered:
 - Polling-only processing is simple but slow and wasteful for large Vaults.
 - A separate Windows service can run while Obsidian is closed but cannot safely use Obsidian's metadata and Vault mutation APIs.
 
-Version 0.1.0 uses an Obsidian-native hybrid: event-driven enqueueing plus a low-frequency reconciliation scan. All mutation occurs through the official Obsidian APIs while the app is open.
+Version 0.1.1 uses an Obsidian-native hybrid: event-driven enqueueing plus a low-frequency reconciliation scan. All mutation occurs through the official Obsidian APIs while the app is open.
 
 The implementation is split into independently testable units:
 
-- `PathPolicy`: normalizes Vault paths, checks configured folder boundaries and extensions, and rejects roots or traversal.
+- `PathPolicy`: normalizes Vault paths, applies Vault-wide or configured-folder scope plus extension rules, and rejects hidden paths, roots, or traversal.
 - `StabilityGate`: samples size and modification time until the file is stable or times out.
 - `JobStore`: persists job state, remote URLs, bounded history, and redacted logs in plugin data.
 - `UploadQueue`: serializes work, deduplicates paths, enforces legal state transitions, and supports cancellation.
@@ -77,7 +77,7 @@ Core logic depends on small interfaces rather than the Obsidian runtime so it ca
 Settings are stored with `Plugin.loadData()`/`saveData()`:
 
 - PicGo endpoint and optional secret.
-- Attachment folder list and allowed extensions.
+- Vault-wide scan toggle, fallback attachment folder list, and allowed extensions.
 - Automation toggle, quiet/stability timing, reconciliation interval, size limit, and retention limits.
 - History and jobs. The secret is stored because Obsidian has no plugin secret store; the UI and README disclose that it resides in the plugin's local `data.json`.
 
@@ -94,7 +94,7 @@ History retains at most 500 terminal entries and 30 days. Active or resumable jo
 ## Processing Flow
 
 1. After `Workspace.onLayoutReady`, register Vault listeners, enqueue the startup scan, and start the reconciliation interval.
-2. A create/modify event or scan result passes through `PathPolicy`. Directories, `.trash`, hidden plugin data, disallowed formats, over-limit files, and paths outside configured folders are ignored or reported.
+2. A create/modify event or scan result passes through `PathPolicy`. Directories, `.trash`, hidden plugin data, disallowed formats, and over-limit files are ignored or reported. Folder boundaries are also enforced when Vault-wide discovery is disabled.
 3. `UploadQueue` deduplicates the normalized path. `StabilityGate` requires two identical size/mtime observations after the quiet period, then the processor rechecks the fingerprint immediately before upload.
 4. `ReferencePlanner` scans all Markdown files' cached embeds. For each embed it uses `MetadataCache.getFirstLinkpathDest(link, sourcePath)` and keeps it only when it resolves to the exact `TFile`. Missing cache, invalid positions, or unsupported syntax produces a safe failure. Zero references produces `skipped-orphan`; no upload occurs.
 5. `PicGoClient` sends exactly one absolute path. Success requires a 2xx response, parseable JSON, `success === true`, exactly one valid `http:` or `https:` URL in `result`, and no contradictory error. If `items` exists, its successful item must agree with the returned URL and source origin when origin is present.
@@ -119,7 +119,7 @@ The replacement remains an image embed and preserves the presentation payload:
 - Wikilinks become `![display-or-empty](remote-url)`; numeric or `WIDTHxHEIGHT` display values remain in Obsidian's external-image alt/size form.
 - Markdown embeds keep their original alt text and optional title while replacing only the destination.
 
-HTML `<img>`, block/reference-style Markdown links, malformed embeds, and other formats are unsupported in 0.1.0. If one may reference the file, deletion is blocked and the status center explains why.
+HTML `<img>`, block/reference-style Markdown links, malformed embeds, and other formats are unsupported in 0.1.1. If one may reference the file, deletion is blocked and the status center explains why.
 
 ## PicGo Contract and Network Safety
 
@@ -130,7 +130,7 @@ HTML `<img>`, block/reference-style Markdown links, malformed embeds, and other 
 - The secret uses `Authorization: Bearer <secret>` and is never added to a URL or log.
 - The request has a configurable 30-second timeout. Aborts caused by plugin unload become `cancelled`; network timeouts/disconnects after dispatch become `uncertain`.
 - `/heartbeat` tests only server availability. It does not mark future uploads safe.
-- Version 0.1.0 does not fetch returned URLs; some image hosts block HEAD/CORS or serve eventually consistent content. The strict PicGo response is the success boundary.
+- Version 0.1.1 does not fetch returned URLs; some image hosts block HEAD/CORS or serve eventually consistent content. The strict PicGo response is the success boundary.
 
 ## User Interface
 
@@ -140,7 +140,7 @@ The native `PluginSettingTab` contains:
 
 - An enable/disable switch and a safety explanation.
 - PicGo endpoint, optional secret, and a Test connection button.
-- Attachment folder editor, allowed-extension editor, file-size limit, and automation timings.
+- Vault-wide discovery toggle, fallback attachment folder editor, allowed-extension editor, file-size limit, and automation timings.
 - A warning/acknowledgement shown only for non-loopback plain HTTP.
 - History retention controls and buttons to open the status center or reset non-secret defaults.
 
@@ -161,7 +161,7 @@ The modal does not occupy a permanent sidebar. A status-bar item shows a compact
 ### Commands
 
 - `Open PicGo Auto Uploader status`
-- `Scan attachment folders now`
+- `Scan referenced images now`
 - `Retry failed uploads`
 
 ## Error Handling and Logging
@@ -190,7 +190,7 @@ The CI gate runs formatting check, lint, typecheck, unit/integration tests with 
 
 The repository is public and uses an MIT license. Root files include `README.md`, `README.zh-CN.md`, `LICENSE`, `SECURITY.md`, `CONTRIBUTING.md`, `manifest.json`, and `versions.json`. Documentation discloses external network use, local file access, desktop-only behavior, PicGo prerequisites, the local `data.json` secret limitation, safety guarantees, recovery, troubleshooting, and manual installation.
 
-GitHub Actions runs CI on pushes and pull requests. A release workflow builds from a SemVer tag matching `manifest.json` exactly (for example `0.1.0`, without a `v` prefix), verifies the package, and publishes `main.js`, `manifest.json`, and `styles.css` as release assets. Initial release version is `0.1.0`.
+GitHub Actions runs CI on pushes and pull requests. A release workflow builds from a SemVer tag matching `manifest.json` exactly (for example `0.1.1`, without a `v` prefix), verifies the package, and publishes `main.js`, `manifest.json`, and `styles.css` as release assets. The initial release was `0.1.0`; this Vault-wide discovery update is `0.1.1`.
 
 ## Acceptance Criteria
 
@@ -200,4 +200,4 @@ GitHub Actions runs CI on pushes and pull requests. A release workflow builds fr
 - An orphan image is neither uploaded nor deleted.
 - Restarting after upload but before rewrite reuses the saved URL instead of uploading again.
 - Settings, queue/history UI, commands, localization, README, CI, and release assets are complete.
-- The public GitHub repository and `0.1.0` release are available under `krona12`.
+- The public GitHub repository and `0.1.1` release are available under `krona12`.

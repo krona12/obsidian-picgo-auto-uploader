@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-19
+
+### Changed
+
+- Scan supported images across the entire Vault by default, including files stored at the Vault root or outside configured attachment folders.
+- Add a **Scan the entire Vault** setting; disabling it restores the configured-folder-only scope.
+- Rename the manual scan command to `Scan referenced images now`.
+
+### Safety
+
+- Vault-wide discovery still excludes hidden folders and Vault trash, and only uploads images with supported Markdown references.
+- Unreferenced images remain local, while upload, rewrite, verification, fingerprint, and trash gates are unchanged.
+
 ## [0.1.0] - 2026-10-19
 
 ### Added
@@ -22,5 +35,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Orphans, ambiguous references, upload uncertainty, concurrent changes, and failures retain the local source.
 - Timeout/disconnect results never retry automatically, and saved URLs resume rewriting without duplicate uploads.
 
-[Unreleased]: https://github.com/krona12/obsidian-picgo-auto-uploader/compare/0.1.0...HEAD
+[Unreleased]: https://github.com/krona12/obsidian-picgo-auto-uploader/compare/0.1.1...HEAD
+[0.1.1]: https://github.com/krona12/obsidian-picgo-auto-uploader/compare/0.1.0...0.1.1
 [0.1.0]: https://github.com/krona12/obsidian-picgo-auto-uploader/releases/tag/0.1.0

@@ -61,6 +61,31 @@ describe("settings UI", () => {
     expect(api.applySettings).toHaveBeenCalledOnce();
   });
 
+  it("offers Vault-wide discovery and applies the folder-only fallback", async () => {
+    const applySettings = vi.fn(async () => {});
+    const tab = new PicGoAutoUploaderSettingTab(
+      {} as never,
+      {} as never,
+      actions({ applySettings }),
+      "en",
+    );
+    tab.display();
+    const toggle = tab.containerEl.querySelector<HTMLInputElement>(
+      'input[data-field="scanEntireVault"]',
+    );
+    expect(toggle).not.toBeNull();
+    expect(toggle!.checked).toBe(true);
+    toggle!.checked = false;
+    toggle!.dispatchEvent(new Event("change"));
+    tab.containerEl
+      .querySelector<HTMLButtonElement>('button[data-action="apply"]')!
+      .click();
+    await Promise.resolve();
+    expect(applySettings).toHaveBeenCalledWith(
+      expect.objectContaining({ scanEntireVault: false }),
+    );
+  });
+
   it("requires a fresh acknowledgement after changing an insecure origin", async () => {
     const applySettings = vi.fn(async () => {});
     const tab = new PicGoAutoUploaderSettingTab(

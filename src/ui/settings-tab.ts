@@ -25,6 +25,7 @@ export interface SettingsFormValues {
   picgoOrigin: string;
   picgoSecret: string;
   allowInsecureHttp: boolean;
+  scanEntireVault: boolean;
   attachmentFolders: string;
   allowedExtensions: string;
   maxFileSizeMb: string;
@@ -47,6 +48,7 @@ function formFromSettings(settings: PluginSettings): SettingsFormValues {
     picgoOrigin: settings.picgoOrigin,
     picgoSecret: settings.picgoSecret,
     allowInsecureHttp: settings.allowInsecureHttp,
+    scanEntireVault: settings.scanEntireVault,
     attachmentFolders: settings.attachmentFolders.join("\n"),
     allowedExtensions: settings.allowedExtensions.join(", "),
     maxFileSizeMb: String(settings.maxFileSizeBytes / (1024 * 1024)),
@@ -90,6 +92,7 @@ export function parseSettingsDraft(
     picgoOrigin: values.picgoOrigin.trim(),
     picgoSecret: values.picgoSecret,
     allowInsecureHttp: values.allowInsecureHttp,
+    scanEntireVault: values.scanEntireVault,
     attachmentFolders: values.attachmentFolders
       .split(/\r?\n/)
       .map((value) => value.trim())
@@ -193,6 +196,11 @@ export class PicGoAutoUploaderSettingTab extends PluginSettingTab {
     this.text("picgoOrigin", "settings.origin", "settings.originDesc");
     this.text("picgoSecret", "settings.secret", "settings.secretDesc", true);
     this.button("test", "settings.test", () => this.testConnection());
+    this.toggle(
+      "scanEntireVault",
+      "settings.scanEntireVault",
+      "settings.scanEntireVaultDesc",
+    );
     this.textarea(
       "attachmentFolders",
       "settings.folders",
@@ -296,7 +304,7 @@ export class PicGoAutoUploaderSettingTab extends PluginSettingTab {
   }
 
   private toggle(
-    field: "enabled",
+    field: "enabled" | "scanEntireVault",
     label: Parameters<typeof t>[1],
     description: Parameters<typeof t>[1],
   ): void {

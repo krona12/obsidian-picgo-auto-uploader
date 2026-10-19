@@ -230,7 +230,7 @@ describe("plugin entry point", () => {
       registration.commands.map((command) => [command.id, command.name]),
     ).toEqual([
       ["open-status", "Open PicGo Auto Uploader status"],
-      ["scan-now", "Scan attachment folders now"],
+      ["scan-now", "Scan referenced images now"],
       ["retry-failed", "Retry failed uploads"],
     ]);
     expect(registration.ribbons).toHaveLength(1);

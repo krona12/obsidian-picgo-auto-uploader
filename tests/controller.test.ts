@@ -21,6 +21,55 @@ function setup(
   return { ...f, controller };
 }
 describe("controller lifecycle", () => {
+  it("discovers and converts a referenced image stored at the Vault root", async () => {
+    const f = setup();
+    f.source.path = "root-image.png";
+    f.source.name = "root-image.png";
+    f.source.basename = "root-image";
+    const embed = "![[root-image.png]]";
+    f.text.set(f.note, embed);
+    f.caches.set(f.note, {
+      embeds: [
+        {
+          link: "root-image.png",
+          original: embed,
+          position: {
+            start: { line: 0, col: 0, offset: 0 },
+            end: { line: 0, col: embed.length, offset: embed.length },
+          },
+        },
+      ],
+    });
+    f.controller.start();
+    f.ready();
+    await f.controller.scanNow();
+    await f.queue.drain();
+    expect(f.uploads()).toBe(1);
+    expect(f.text.get(f.note)).toBe("![](<https://cdn.test/image.png>)");
+    expect(f.trash).toEqual(["root-image.png"]);
+    await f.controller.stop();
+  });
+
+  it("retains an unreferenced image discovered outside configured folders", async () => {
+    const f = setup();
+    f.source.path = "loose.png";
+    f.source.name = "loose.png";
+    f.source.basename = "loose";
+    f.files.splice(f.files.indexOf(f.note), 1);
+    f.controller.start();
+    f.ready();
+    await f.controller.scanNow();
+    await f.queue.drain();
+    expect(f.uploads()).toBe(0);
+    expect(f.trash).toEqual([]);
+    expect(f.job()).toMatchObject({
+      vaultPath: "loose.png",
+      state: "skipped",
+      failure: { code: "orphan", stage: "reference" },
+    });
+    await f.controller.stop();
+  });
+
   it("starts automatic scan only at layout ready and exposes immutable aggregates", async () => {
     const f = setup();
     f.controller.start();
@@ -515,6 +564,7 @@ describe("restart recovery and resilient shutdown", () => {
   it("classifies an interrupted upload even after its folder is removed from automatic policy", async () => {
     const f = setup(true, interrupted("uploading"));
     await f.store.hydrate();
+    f.settings.scanEntireVault = false;
     f.settings.attachmentFolders = ["other"];
     f.controller.start();
     f.ready();
