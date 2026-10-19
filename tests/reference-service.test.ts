@@ -293,8 +293,25 @@ describe("Obsidian reference discovery and rewriting", () => {
     ["tilde fence", "~~~\n![[a.png]]\n~~~", 4],
     ["fence with indented pseudo-close", "```\n    ```\n![[a.png]]\n```", 12],
     ["fence with shorter pseudo-close", "````\n```\n![[a.png]]\n````", 9],
+    [
+      "unquoted fence with quoted pseudo-close",
+      "```\n> ```\n![[a.png]]\n```",
+      10,
+    ],
+    ["tilde fence with quoted pseudo-close", "~~~\n> ~~~\n![[a.png]]\n~~~", 10],
+    [
+      "quoted fence with nested-quote pseudo-close",
+      "> ```\n> > ```\n> ![[a.png]]\n> ```",
+      16,
+    ],
     ["quoted fence", "> ```\n> ![[a.png]]\n> ```", 8],
     ["indented code", "    ![[a.png]]", 4],
+    ["unordered list-indented code", "-     ![[a.png]]", 6],
+    ["ordered list-indented code", "1.     ![[a.png]]", 7],
+    ["quoted list-indented code", "> -     ![[a.png]]", 8],
+    ["nested list-indented code", "- -     ![[a.png]]", 8],
+    ["tab-indented unordered list code", "-\t\t![[a.png]]", 3],
+    ["tab-indented ordered list code", "1.\t\t![[a.png]]", 4],
     ["HTML comment", "<!-- ![[a.png]] -->", 5],
     ["Obsidian comment", "%% ![[a.png]] %%", 3],
   ])(
@@ -330,6 +347,10 @@ describe("Obsidian reference discovery and rewriting", () => {
     ["```\nexample\n```\n", 16],
     ["<!-- comment --> ", 17],
     ["%% comment %% ", 14],
+    ["> ```\n> example\n> ```\n", 22],
+    ["- ", 2],
+    ["1. ", 3],
+    ["- - ", 4],
   ])(
     "still rewrites a proven embed after closed literal context %s",
     async (prefix, start) => {

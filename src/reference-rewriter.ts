@@ -65,7 +65,7 @@ export function hasSafeEmbedContext(content: string, start: number): boolean {
   )
     backslashes++;
   if (backslashes % 2 !== 0) return false;
-  let fence: { marker: string; length: number } | undefined;
+  let fence: { marker: string; length: number; container: string } | undefined;
   let inlineTicks = 0;
   let comment: "html" | "obsidian" | undefined;
   let lineStart = 0;
@@ -80,10 +80,14 @@ export function hasSafeEmbedContext(content: string, start: number): boolean {
       /^[ \t]*(?:(?:>[ \t]*|(?:[-+*]|\d+[.)])[ \t]+))*(`{3,}|~{3,})(.*)$/.exec(
         line,
       );
+    const container = marker
+      ? line.slice(0, line.indexOf(marker[1]!)).replace(/[ \t]/g, "")
+      : "";
     if (fence) {
       if (currentLine) return false;
       if (
         marker &&
+        container === fence.container &&
         marker[1]![0] === fence.marker &&
         marker[1]!.length >= fence.length &&
         /^ {0,3}(?:`+|~+)[ \t]*$/.test(withoutQuotes)
@@ -91,9 +95,15 @@ export function hasSafeEmbedContext(content: string, start: number): boolean {
         fence = undefined;
     } else if (!comment && inlineTicks === 0 && marker) {
       if (currentLine) return false;
-      fence = { marker: marker[1]![0]!, length: marker[1]!.length };
+      fence = { marker: marker[1]![0]!, length: marker[1]!.length, container };
     } else {
-      if (currentLine && /^(?: {4}| *\t)/.test(withoutQuotes)) return false;
+      // Remove only a container's required separator, preserving extra spaces
+      // that make the content an indented code block (including nested lists).
+      let nestedContent = line;
+      const prefix = /^(?: {0,3}>[ \t]?| {0,3}(?:[-+*]|\d+[.)])(?: |(?=\t)))/;
+      while (prefix.test(nestedContent))
+        nestedContent = nestedContent.replace(prefix, "");
+      if (currentLine && /^(?: {4}| *\t)/.test(nestedContent)) return false;
       const limit = Math.min(start, lineEnd);
       for (let cursor = lineStart; cursor < limit;) {
         if (comment) {
