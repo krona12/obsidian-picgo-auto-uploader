@@ -384,7 +384,15 @@ describe("workflow policy", () => {
     expect(workflow).toMatch(/npm run check/);
     expect(workflow).toMatch(/retention-days:\s*[1-9]/);
     expect(workflow).toMatch(/gh release create.*--draft/);
-    expect(workflow).toMatch(/gh release edit.*--draft=false.*--latest/);
+    expect(workflow).toMatch(/existing_release_ids=.*gh api[\s\S]*releases/);
+    expect(workflow).toMatch(/draft_release_ids=.*gh api[\s\S]*releases/);
+    expect(workflow).toMatch(/releases\/\$DRAFT_RELEASE_ID/);
+    expect(workflow).toMatch(
+      /--method PATCH[\s\S]*-F draft=false[\s\S]*-f make_latest=true/,
+    );
+    expect(workflow).not.toMatch(/releases\/tags\/\$RELEASE_TAG/);
+    expect(workflow).not.toMatch(/gh release view/);
+    expect(workflow).not.toMatch(/gh release edit/);
     expect(workflow).toMatch(/release\/main\.js/);
     expect(workflow).toMatch(/release\/manifest\.json/);
     expect(workflow).toMatch(/release\/styles\.css/);
