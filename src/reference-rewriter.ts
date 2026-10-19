@@ -55,6 +55,91 @@ export function isExternalDestination(value: string): boolean {
   return /^https?:\/\//i.test(value);
 }
 
+/** A conservative context gate, not an alternative source of embed references. */
+export function hasSafeEmbedContext(content: string, start: number): boolean {
+  let backslashes = 0;
+  for (
+    let cursor = start - 1;
+    cursor >= 0 && content[cursor] === "\\";
+    cursor--
+  )
+    backslashes++;
+  if (backslashes % 2 !== 0) return false;
+  let fence: { marker: string; length: number } | undefined;
+  let inlineTicks = 0;
+  let comment: "html" | "obsidian" | undefined;
+  let lineStart = 0;
+  while (lineStart <= start) {
+    const newline = content.indexOf("\n", lineStart);
+    const lineEnd = newline < 0 ? content.length : newline;
+    const line = content.slice(lineStart, lineEnd).replace(/\r$/, "");
+    const withoutQuotes = line.replace(/^(?: {0,3}>[ \t]?)+/, "");
+    const currentLine = start <= lineEnd;
+    // Container prefixes allow quoted/list fences. Ambiguous nesting is retained.
+    const marker =
+      /^[ \t]*(?:(?:>[ \t]*|(?:[-+*]|\d+[.)])[ \t]+))*(`{3,}|~{3,})(.*)$/.exec(
+        line,
+      );
+    if (fence) {
+      if (currentLine) return false;
+      if (
+        marker &&
+        marker[1]![0] === fence.marker &&
+        marker[1]!.length >= fence.length &&
+        /^ {0,3}(?:`+|~+)[ \t]*$/.test(withoutQuotes)
+      )
+        fence = undefined;
+    } else if (!comment && inlineTicks === 0 && marker) {
+      if (currentLine) return false;
+      fence = { marker: marker[1]![0]!, length: marker[1]!.length };
+    } else {
+      if (currentLine && /^(?: {4}| *\t)/.test(withoutQuotes)) return false;
+      const limit = Math.min(start, lineEnd);
+      for (let cursor = lineStart; cursor < limit;) {
+        if (comment) {
+          const close = comment === "html" ? "-->" : "%%";
+          if (content.startsWith(close, cursor)) {
+            comment = undefined;
+            cursor += close.length;
+          } else cursor++;
+          continue;
+        }
+        if (content[cursor] === "`") {
+          let end = cursor + 1;
+          while (content[end] === "`") end++;
+          const length = end - cursor;
+          if (inlineTicks === 0) inlineTicks = length;
+          else if (inlineTicks === length) inlineTicks = 0;
+          cursor = end;
+          continue;
+        }
+        if (inlineTicks !== 0) {
+          cursor++;
+          continue;
+        }
+        if (content[cursor] === "\\") {
+          cursor += 2;
+          continue;
+        }
+        if (content.startsWith("<!--", cursor)) {
+          comment = "html";
+          cursor += 4;
+          continue;
+        }
+        if (content.startsWith("%%", cursor)) {
+          comment = "obsidian";
+          cursor += 2;
+          continue;
+        }
+        cursor++;
+      }
+    }
+    if (currentLine) return !fence && !comment && inlineTicks === 0;
+    lineStart = lineEnd + 1;
+  }
+  return false;
+}
+
 /** Parse only a whole, losslessly understood image embed. Uncertain syntax is a blocker. */
 export function parseEmbed(
   source: string,

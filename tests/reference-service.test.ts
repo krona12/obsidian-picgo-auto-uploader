@@ -244,6 +244,109 @@ describe("Obsidian reference discovery and rewriting", () => {
     },
   );
 
+  it.each([
+    ["named-link.html", '<a href="attachments/a&period;png">image</a>'],
+    ["named-link.md", '<a href="attachments&sol;a&period;png">image</a>'],
+    [
+      "style-attribute.html",
+      '<div style="background-image: url(attachments/a&period;png)"></div>',
+    ],
+    [
+      "stylesheet.html",
+      '<style>.image { background: url("attachments/a&period;png") }</style>',
+    ],
+    ["unknown-link.html", '<a href="attachments/&unknown;">image</a>'],
+    ["prototype-entity.html", '<a href="attachments/&constructor;">image</a>'],
+    [
+      "unknown-style.html",
+      '<style>.image { background: url("attachments/&unknown;") }</style>',
+    ],
+  ])(
+    "blocks entity-bearing unsupported URLs in discovery and final verification: %s",
+    async (path, text) => {
+      const f = linked();
+      await f.service.rewrite(
+        await f.service.discover(f.target),
+        "https://cdn.example/a.png",
+      );
+      f.add(path, text);
+      expect((await f.service.discover(f.target)).blockers).toContainEqual(
+        expect.objectContaining({
+          code: "unsupported-dependency",
+          notePath: path,
+        }),
+      );
+      expect(await f.service.verifyNoLocalReferences(f.target)).toMatchObject({
+        ok: false,
+        error: { code: "unsupported-dependency", notePath: path },
+      });
+      expect(f.contents.get(path)).toBe(text);
+    },
+  );
+
+  it.each([
+    ["inline code", "`![[a.png]]`", 1],
+    ["double-backtick code", "``![[a.png]]``", 2],
+    ["multiline inline code", "`example\n![[a.png]]`", 9],
+    ["escaped image", "\\![[a.png]]", 1],
+    ["backtick fence", "```\n![[a.png]]\n```", 4],
+    ["tilde fence", "~~~\n![[a.png]]\n~~~", 4],
+    ["fence with indented pseudo-close", "```\n    ```\n![[a.png]]\n```", 12],
+    ["fence with shorter pseudo-close", "````\n```\n![[a.png]]\n````", 9],
+    ["quoted fence", "> ```\n> ![[a.png]]\n> ```", 8],
+    ["indented code", "    ![[a.png]]", 4],
+    ["HTML comment", "<!-- ![[a.png]] -->", 5],
+    ["Obsidian comment", "%% ![[a.png]] %%", 3],
+  ])(
+    "rejects metadata already stale before discovery in %s",
+    async (_label, text, start) => {
+      const f = linked();
+      f.contents.set("one.md", text);
+      f.caches.set(f.note, { embeds: [embed("![[a.png]]", "a.png", start)] });
+      const plan = await f.service.discover(f.target);
+      expect(plan.references).toEqual([]);
+      expect(plan.blockers).toContainEqual(
+        expect.objectContaining({
+          code: "unsafe-markdown-context",
+          notePath: "one.md",
+        }),
+      );
+      expect(
+        await f.service.rewrite(plan, "https://cdn.example/a.png"),
+      ).toMatchObject({
+        ok: false,
+        error: { rewrittenNotePaths: [], rewrittenReferenceCount: 0 },
+      });
+      expect(await f.service.verifyNoLocalReferences(f.target)).toMatchObject({
+        ok: false,
+        error: { code: "unsafe-markdown-context" },
+      });
+      expect(f.contents.get("one.md")).toBe(text);
+    },
+  );
+
+  it.each([
+    ["`example` ", 10],
+    ["```\nexample\n```\n", 16],
+    ["<!-- comment --> ", 17],
+    ["%% comment %% ", 14],
+  ])(
+    "still rewrites a proven embed after closed literal context %s",
+    async (prefix, start) => {
+      const f = linked();
+      f.contents.set("one.md", `${prefix}![[a.png]]`);
+      f.caches.set(f.note, { embeds: [embed("![[a.png]]", "a.png", start)] });
+      const plan = await f.service.discover(f.target);
+      expect(plan.blockers).toEqual([]);
+      expect(
+        await f.service.rewrite(plan, "https://cdn.example/a.png"),
+      ).toMatchObject({ ok: true });
+      expect(f.contents.get("one.md")).toBe(
+        `${prefix}![](<https://cdn.example/a.png>)`,
+      );
+    },
+  );
+
   it("uses decoded escaped Markdown paths for exact metadata resolution", async () => {
     const f = fixture();
     const target = f.add("attachments/a (1).png", "image");

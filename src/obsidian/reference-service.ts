@@ -11,6 +11,7 @@ import {
   applyVerifiedEdits,
   buildRewriteEdit,
   decodeDestination,
+  hasSafeEmbedContext,
   isExternalDestination,
   parseEmbed,
   referenceFailure,
@@ -49,6 +50,43 @@ interface RefreshWatch {
 
 /** Only used to find blockers, never to identify a replacement. */
 function searchableText(text: string): string {
+  const entities: Record<string, string> = {
+    period: ".",
+    sol: "/",
+    bsol: "\\",
+    colon: ":",
+    quest: "?",
+    num: "#",
+    percnt: "%",
+    amp: "&",
+    AMP: "&",
+    equals: "=",
+    lowbar: "_",
+    hyphen: "-",
+    semi: ";",
+    lpar: "(",
+    rpar: ")",
+    lsqb: "[",
+    rsqb: "]",
+    lcub: "{",
+    rcub: "}",
+    comma: ",",
+    commat: "@",
+    plus: "+",
+    ast: "*",
+    excl: "!",
+    dollar: "$",
+    tilde: "~",
+    vert: "|",
+    quot: '"',
+    QUOT: '"',
+    apos: "'",
+    lt: "<",
+    gt: ">",
+    Tab: "\t",
+    NewLine: "\n",
+    nbsp: "\u00a0",
+  };
   const decoded = text
     .replace(/\\u([\da-f]{4})/gi, (_match, code: string) =>
       String.fromCharCode(parseInt(code, 16)),
@@ -60,6 +98,9 @@ function searchableText(text: string): string {
           : parseInt(code, 10);
       return point <= 0x10ffff ? String.fromCodePoint(point) : match;
     })
+    .replace(/&([a-z][a-z\d]*);/gi, (match, name: string) =>
+      Object.hasOwn(entities, name) ? entities[name]! : match,
+    )
     .replace(/%(?:[\da-f]{2})(?:%[\da-f]{2})*/gi, (match) => {
       try {
         return decodeURIComponent(match);
@@ -163,6 +204,12 @@ export class ObsidianReferenceService {
     // the literal filename. False-positive retention is preferable to deletion.
     return (
       searchable.includes(target.name.toLowerCase()) ||
+      // Unknown entities may encode arbitrary filename characters. Without a
+      // proven decoding, URL-bearing HTML/CSS must retain the local source.
+      (/&[a-z][a-z\d]*;?/i.test(searchable) &&
+        /<[a-z][^>]*>|\burl\s*\(|@import|\bbackground(?:-image)?\s*:/i.test(
+          searchable,
+        )) ||
       /!\[|<(?:img|source|object|embed)\b/i.test(searchable) ||
       new RegExp(
         `\\[\\[\\s*(?:[^|#\\]\\n]*[/\\\\])?${stem}(?:[#|\\]]|$)`,
@@ -222,6 +269,12 @@ export class ObsidianReferenceService {
     for (let index = 0; index < embeds.length; index++) {
       const embed = embeds[index]!;
       const slice = slices[index]!;
+      if (!hasSafeEmbedContext(content, slice.start)) {
+        plan.blockers.push(
+          referenceFailure("unsafe-markdown-context", file.path),
+        );
+        continue;
+      }
       const parsed = parseEmbed(embed.original);
       if (!parsed.ok) {
         plan.blockers.push(referenceFailure("unsupported-syntax", file.path));
@@ -315,6 +368,10 @@ export class ObsidianReferenceService {
           if (content !== this.noteContents.get(plan)?.get(path))
             validationError = referenceFailure("stale-offsets", path);
           else if (!result.ok) validationError = result.error;
+          else if (
+            !edits.every((edit) => hasSafeEmbedContext(content, edit.start))
+          )
+            validationError = referenceFailure("unsafe-markdown-context", path);
           else if (!this.sourceMatches(target, plan))
             validationError = referenceFailure("source-changed", path);
           else if (
