@@ -1,0 +1,272 @@
+import type {
+  JobRecord,
+  JobState,
+  LogEntry,
+  PluginSettings,
+  SourceFingerprint,
+} from "../domain";
+import { sameFingerprint } from "../attachment-processor";
+import { isTerminalState, JobStore } from "../job-store";
+import { isEligibleAttachment, normalizeVaultPath } from "../path-policy";
+import { redactText } from "../redaction";
+import { UploadQueue, type EnqueueResult } from "../upload-queue";
+
+export interface ControllerLifecycle {
+  onLayoutReady(callback: () => void): () => void;
+  onFileEvent(callback: (path: string) => void): () => void;
+  listPaths(): string[];
+  stat(path: string): Promise<SourceFingerprint | null>;
+}
+export interface ScanResult {
+  eligible: number;
+  enqueued: number;
+  failed: number;
+}
+type DeepReadonly<T> = T extends object
+  ? { readonly [K in keyof T]: DeepReadonly<T[K]> }
+  : T;
+export type ControllerSnapshot = DeepReadonly<{
+  state: "running" | "stopped";
+  counts: Partial<Record<JobState, number>>;
+  lastScanTime: number | null;
+  lastScan: ScanResult | null;
+  jobs: JobRecord[];
+  logs: LogEntry[];
+}>;
+function freeze<T>(value: T): DeepReadonly<T> {
+  if (value && typeof value === "object") {
+    for (const child of Object.values(value)) freeze(child);
+    Object.freeze(value);
+  }
+  return value as DeepReadonly<T>;
+}
+function redactSnapshot<T>(value: T, secret: string): T {
+  if (typeof value === "string") return redactText(value, [secret]) as T;
+  if (Array.isArray(value))
+    return value.map((item) => redactSnapshot(item, secret)) as T;
+  if (value && typeof value === "object")
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        key,
+        redactSnapshot(item, secret),
+      ]),
+    ) as T;
+  return value;
+}
+export class AutoUploaderController {
+  private running = false;
+  private generation = 0;
+  private cancellation = 0;
+  private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
+  private interval: ReturnType<typeof setInterval> | undefined;
+  private releases: (() => void)[] = [];
+  private lastScanTime: number | null = null;
+  private lastScan: ScanResult | null = null;
+  private scan: Promise<ScanResult> | undefined;
+  private stopping: Promise<void> | undefined;
+  private readonly listeners = new Set<
+    (snapshot: ControllerSnapshot) => void
+  >();
+  constructor(
+    private readonly dependencies: {
+      settings: Readonly<PluginSettings>;
+      store: JobStore;
+      queue: UploadQueue;
+      lifecycle: ControllerLifecycle;
+    },
+  ) {}
+  start(): void {
+    if (this.running || this.stopping) return;
+    this.running = true;
+    const generation = ++this.generation;
+    let ready = false;
+    this.releases.push(this.dependencies.store.subscribe(() => this.publish()));
+    this.releases.push(
+      this.dependencies.lifecycle.onLayoutReady(() => {
+        if (
+          ready ||
+          !this.running ||
+          generation !== this.generation ||
+          !this.dependencies.settings.enabled
+        )
+          return;
+        ready = true;
+        this.releases.push(
+          this.dependencies.lifecycle.onFileEvent((path) => this.event(path)),
+        );
+        this.interval = setInterval(() => {
+          if (this.dependencies.settings.enabled) void this.scanNow();
+        }, this.dependencies.settings.reconciliationIntervalMs);
+        void this.scanNow();
+      }),
+    );
+    this.publish();
+  }
+  stop(): Promise<void> {
+    if (this.stopping) return this.stopping;
+    this.running = false;
+    this.generation++;
+    for (const timer of this.timers.values()) clearTimeout(timer);
+    this.timers.clear();
+    clearInterval(this.interval);
+    this.interval = undefined;
+    for (const release of this.releases) release();
+    this.releases = [];
+    this.stopping = this.dependencies.queue
+      .cancelPending()
+      .then(async () => {
+        await this.scan;
+        await this.dependencies.queue.drain();
+      })
+      .finally(() => {
+        this.stopping = undefined;
+        this.publish();
+      });
+    return this.stopping;
+  }
+  scanNow(): Promise<ScanResult> {
+    if (!this.running)
+      return Promise.resolve({ eligible: 0, enqueued: 0, failed: 0 });
+    if (this.scan) return this.scan;
+    const generation = this.generation;
+    this.scan = this.scanPaths(generation, this.cancellation).finally(() => {
+      this.scan = undefined;
+      this.publish();
+    });
+    return this.scan;
+  }
+  private async scanPaths(
+    generation: number,
+    cancellation: number,
+  ): Promise<ScanResult> {
+    const result: ScanResult = { eligible: 0, enqueued: 0, failed: 0 };
+    try {
+      const paths = [...new Set(this.dependencies.lifecycle.listPaths())];
+      for (const path of paths) {
+        if (
+          !this.running ||
+          generation !== this.generation ||
+          cancellation !== this.cancellation
+        )
+          break;
+        if (!isEligibleAttachment(path, this.dependencies.settings)) continue;
+        result.eligible++;
+        const previous = this.job(path);
+        const enqueued =
+          previous?.state === "skipped" && previous.failure?.code === "orphan"
+            ? await this.dependencies.queue.retry(path)
+            : await this.dependencies.queue.enqueue(path);
+        if (!enqueued.ok) result.failed++;
+        else if (enqueued.value === "enqueued") result.enqueued++;
+      }
+    } catch {
+      result.failed++;
+    }
+    this.lastScanTime = Date.now();
+    this.lastScan = result;
+    return { ...result };
+  }
+  retry(
+    path: string,
+    options: { acknowledgeUncertain?: boolean } = {},
+  ): Promise<EnqueueResult> {
+    return this.running
+      ? this.dependencies.queue.retry(path, options)
+      : Promise.resolve({ ok: false, error: { code: "not-retryable" } });
+  }
+  retrySafeFailures(): Promise<EnqueueResult[]> {
+    return this.running
+      ? this.dependencies.queue.retrySafeFailures()
+      : Promise.resolve([]);
+  }
+  cancelPending(): Promise<void> {
+    this.cancellation++;
+    for (const timer of this.timers.values()) clearTimeout(timer);
+    this.timers.clear();
+    return this.dependencies.queue.cancelPending();
+  }
+  subscribe(listener: (snapshot: ControllerSnapshot) => void): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+  snapshot(): ControllerSnapshot {
+    const data = this.dependencies.store.snapshot();
+    // Redact stored diagnostic text as well as current errors; settings never enter views.
+    const safe = redactSnapshot(data, this.dependencies.settings.picgoSecret);
+    const counts: Partial<Record<JobState, number>> = {};
+    for (const job of safe.jobs)
+      counts[job.state] = (counts[job.state] ?? 0) + 1;
+    return freeze({
+      state: this.running ? "running" : "stopped",
+      counts,
+      lastScanTime: this.lastScanTime,
+      lastScan: this.lastScan ? { ...this.lastScan } : null,
+      ...safe,
+    });
+  }
+  private publish(): void {
+    for (const listener of this.listeners) {
+      try {
+        void Promise.resolve(listener(this.snapshot())).catch(() => {});
+      } catch {
+        /* Views do not own processing. */
+      }
+    }
+  }
+  private job(path: string): JobRecord | undefined {
+    return this.dependencies.store
+      .snapshot()
+      .jobs.find((job) => job.vaultPath === path);
+  }
+  private event(input: string): void {
+    const path = normalizeVaultPath(input);
+    if (
+      !this.running ||
+      !this.dependencies.settings.enabled ||
+      !path ||
+      !isEligibleAttachment(path, this.dependencies.settings)
+    )
+      return;
+    clearTimeout(this.timers.get(path));
+    const generation = this.generation;
+    const cancellation = this.cancellation;
+    this.timers.set(
+      path,
+      setTimeout(() => {
+        this.timers.delete(path);
+        void this.enqueueEvent(path, generation, cancellation).catch(() => {});
+      }, this.dependencies.settings.quietPeriodMs),
+    );
+  }
+  private async enqueueEvent(
+    path: string,
+    generation: number,
+    cancellation: number,
+  ): Promise<void> {
+    const active = () =>
+      this.running &&
+      generation === this.generation &&
+      cancellation === this.cancellation &&
+      this.dependencies.settings.enabled;
+    if (!active()) return;
+    const job = this.job(path);
+    if (job && isTerminalState(job.state)) {
+      if (
+        job.state === "uncertain" ||
+        job.failure?.retry !== "safe" ||
+        !job.fingerprint
+      )
+        return;
+      const fingerprint = await this.dependencies.lifecycle.stat(path);
+      if (
+        !active() ||
+        !fingerprint ||
+        sameFingerprint(fingerprint, job.fingerprint)
+      )
+        return;
+      await this.dependencies.queue.retry(path);
+    } else if (active()) await this.dependencies.queue.enqueue(path);
+  }
+}

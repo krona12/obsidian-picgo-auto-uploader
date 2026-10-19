@@ -224,7 +224,7 @@ function parseResponse(
   return { ok: true, value: data };
 }
 
-function validRemoteUrl(value: unknown): value is string {
+export function validRemoteUrl(value: unknown): value is string {
   if (
     typeof value !== "string" ||
     !value ||
