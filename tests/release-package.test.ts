@@ -120,7 +120,7 @@ describe("release identity", () => {
     const versions = json<Record<string, string>>("versions.json");
 
     expect(pkg.version).toMatch(stableSemver);
-    expect(pkg.version).toBe("0.1.2");
+    expect(pkg.version).toBe("0.1.3");
     expect(manifest).toMatchObject({
       id: "picgo-auto-uploader",
       name: "PicGo Auto Uploader",
@@ -355,8 +355,8 @@ describe("release package", () => {
   });
 
   test("rejects mismatched and v-prefixed tags without replacing valid assets", () => {
-    expectFailedWithoutReplacing(["--tag", "0.1.3"]);
-    expectFailedWithoutReplacing(["--tag", "v0.1.2"]);
+    expectFailedWithoutReplacing(["--tag", "0.1.4"]);
+    expectFailedWithoutReplacing(["--tag", "v0.1.3"]);
   });
 });
 

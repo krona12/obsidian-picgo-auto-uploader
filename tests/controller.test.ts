@@ -115,28 +115,97 @@ describe("controller lifecycle", () => {
     await f.queue.drain();
     expect(f.job().failure?.code).toBe("orphan");
     f.files.push(f.note);
+    f.event(f.note);
     await vi.advanceTimersByTimeAsync(100);
     await f.queue.drain();
     expect(f.job().state).toBe("trashed");
     await f.controller.stop();
   });
-  it("bounds repeated orphan retry logs during ordinary reconciliation", async () => {
+  it("does not retry or relog an unchanged orphan during ordinary reconciliation", async () => {
     vi.useFakeTimers();
-    const f = setup(true, undefined, {
-      historyMaxEntries: 2,
-      historyMaxAgeDays: 30,
-    });
+    const f = setup();
     f.files.splice(f.files.indexOf(f.note), 1);
     f.controller.start();
     f.ready();
     await f.controller.scanNow();
     await f.queue.drain();
+    const logCount = f.store.snapshot().logs.length;
+    const updatedAt = f.job().updatedAt;
     for (let index = 0; index < 5; index++) {
       await vi.advanceTimersByTimeAsync(100);
       await f.queue.drain();
     }
-    expect(f.store.snapshot().logs.length).toBeLessThanOrEqual(2);
+    expect(f.store.snapshot().logs.length).toBe(logCount);
+    expect(f.job().updatedAt).toBe(updatedAt);
     expect(f.job().state).toBe("skipped");
+    await f.controller.stop();
+  });
+  it("rechecks an orphan once after a reference-bearing file changes", async () => {
+    vi.useFakeTimers();
+    const f = setup();
+    f.files.splice(f.files.indexOf(f.note), 1);
+    f.controller.start();
+    f.ready();
+    await f.controller.scanNow();
+    await f.queue.drain();
+    const firstLogCount = f.store.snapshot().logs.length;
+    const unrelated = f.add("unrelated.md");
+
+    f.event(unrelated);
+    await vi.advanceTimersByTimeAsync(10);
+    await f.queue.drain();
+    expect(f.job().state).toBe("skipped");
+    expect(f.store.snapshot().logs.length).toBe(firstLogCount + 1);
+
+    await vi.advanceTimersByTimeAsync(500);
+    await f.queue.drain();
+    expect(f.store.snapshot().logs.length).toBe(firstLogCount + 1);
+    await f.controller.stop();
+  });
+  it.each(["rename", "delete"] as const)(
+    "treats a reference-bearing %s event as a new discovery revision",
+    async (event) => {
+      vi.useFakeTimers();
+      const f = setup();
+      f.files.splice(f.files.indexOf(f.note), 1);
+      const unrelated = f.add(
+        event === "rename" ? "unrelated.txt" : "unrelated.md",
+      );
+      f.controller.start();
+      f.ready();
+      await f.controller.scanNow();
+      await f.queue.drain();
+      const firstLogCount = f.store.snapshot().logs.length;
+
+      f.vaultEvent(event, unrelated, event === "rename" ? "old.md" : undefined);
+      await vi.advanceTimersByTimeAsync(10);
+      await f.queue.drain();
+      expect(f.store.snapshot().logs.length).toBe(firstLogCount + 1);
+      await f.controller.stop();
+    },
+  );
+  it("rechecks an orphan when a note changes before its active worker releases", async () => {
+    vi.useFakeTimers();
+    const f = setup();
+    f.settings.reconciliationIntervalMs = 100_000;
+    f.files.splice(f.files.indexOf(f.note), 1);
+    f.holdWorkerAfterProcess();
+    f.controller.start();
+    f.ready();
+    await f.controller.scanNow();
+    await f.workerAfterProcess();
+    expect(f.job().state).toBe("skipped");
+
+    f.files.push(f.note);
+    f.event(f.note);
+    await vi.advanceTimersByTimeAsync(10);
+    await f.controller.scanNow();
+    f.event(f.note);
+    await vi.advanceTimersByTimeAsync(10);
+    f.releaseWorkerAfterProcess();
+    await f.queue.drain();
+    await vi.waitFor(() => expect(f.job().state).toBe("trashed"));
+    expect(f.uploads()).toBe(1);
     await f.controller.stop();
   });
   it("advances age retention during an idle reconciliation scan", async () => {
@@ -510,6 +579,34 @@ describe("restart recovery and resilient shutdown", () => {
     logs: [],
   });
 
+  it("rechecks a persisted orphan once at startup without periodic relogging", async () => {
+    vi.useFakeTimers();
+    const f = setup(
+      true,
+      interrupted("skipped", {
+        failure: {
+          code: "orphan",
+          stage: "reference",
+          message: "No supported local image reference was found.",
+          retry: "safe",
+        },
+      }),
+    );
+    f.files.splice(f.files.indexOf(f.note), 1);
+    await f.store.hydrate();
+    f.controller.start();
+    f.ready();
+    await f.controller.scanNow();
+    await f.queue.drain();
+    expect(f.job().state).toBe("skipped");
+    expect(f.store.snapshot().logs).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(500);
+    await f.queue.drain();
+    expect(f.store.snapshot().logs).toHaveLength(1);
+    await f.controller.stop();
+  });
+
   it("hydrates and resumes rewriting while retaining exact prior progress and never reuploading", async () => {
     const f = setup(
       true,
@@ -662,6 +759,30 @@ describe("restart recovery and resilient shutdown", () => {
       state: "trashed",
       remoteUrl: "https://cdn.test/image.png",
     });
+    expect(f.text.get(f.note)).toBe("![](<https://cdn.test/image.png>)");
+    await f.controller.stop();
+  });
+  it("retries a persisted reference-state race without uploading again", async () => {
+    const f = setup(
+      true,
+      interrupted("failed", {
+        remoteUrl: "https://cdn.test/image.png",
+        failure: {
+          code: "reference-state-changed",
+          stage: "verify",
+          message: "The reference state changed during verification.",
+          retry: "safe",
+        },
+      }),
+    );
+    await f.store.hydrate();
+    f.controller.start();
+    f.ready();
+    await f.controller.scanNow();
+    await f.queue.drain();
+
+    expect(f.uploads()).toBe(0);
+    expect(f.job().state).toBe("trashed");
     expect(f.text.get(f.note)).toBe("![](<https://cdn.test/image.png>)");
     await f.controller.stop();
   });

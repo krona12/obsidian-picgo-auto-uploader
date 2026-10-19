@@ -48,7 +48,11 @@ function fixture() {
       contents.set(file.path, next);
       file.stat.mtime++;
       file.stat.size = next.length;
-      if (refresh) emit(file, next, {});
+      if (refresh) {
+        emit(file, next, {});
+        emitMetadata("resolve", file);
+        emitMetadata("resolved");
+      }
       if (failAfterCommit) throw new Error("post-commit failure");
       return next;
     },
@@ -78,6 +82,13 @@ function fixture() {
     for (const handler of handlers.values())
       if (handler.name === "changed") handler.callback(file, data, cache);
   }
+  function emitMetadata(name: "resolve" | "resolved", file?: TFile): void {
+    for (const handler of handlers.values()) {
+      if (handler.name !== name) continue;
+      if (name === "resolve") handler.callback(file);
+      else handler.callback();
+    }
+  }
   function add(path: string, text = "", embeds: EmbedCache[] = []): TFile {
     const name = path.split("/").at(-1)!;
     const file: TFile = {
@@ -102,6 +113,7 @@ function fixture() {
     failedReads,
     failedWrites,
     emit,
+    emitMetadata,
     handlers,
     vault,
     metadata,
@@ -929,6 +941,40 @@ describe("Obsidian reference discovery and rewriting", () => {
     expect(f.handlers.size).toBe(0);
   });
 
+  it.each([2, 3])(
+    "cleans earlier refresh listeners if metadata registration %i fails",
+    async (failureAt) => {
+      const f = linked();
+      const original = f.metadata.on.bind(f.metadata);
+      let registrations = 0;
+      f.metadata.on = ((name, callback) => {
+        registrations++;
+        if (registrations === failureAt)
+          throw new Error("metadata unavailable");
+        return Reflect.apply(original, f.metadata, [
+          name,
+          callback,
+        ]) as EventRef;
+      }) as ReferenceMetadata["on"];
+
+      expect(
+        await f.service.rewrite(
+          await f.service.discover(f.target),
+          "https://cdn.example/a.png",
+        ),
+      ).toMatchObject({
+        ok: false,
+        error: {
+          code: "process-failed",
+          rewrittenNotePaths: [],
+          rewrittenReferenceCount: 0,
+        },
+      });
+      expect(f.contents.get("one.md")).toBe("![[a.png]]");
+      expect(f.handlers.size).toBe(0);
+    },
+  );
+
   it("can recover with fresh metadata after a refresh timeout and keeps external text untouched", async () => {
     vi.useFakeTimers();
     const f = linked();
@@ -949,6 +995,71 @@ describe("Obsidian reference discovery and rewriting", () => {
       value: undefined,
     });
     expect(f.contents.get("one.md")).toBe("![](<https://cdn.example/a.png>)");
+  });
+
+  it("waits for the rewritten note to resolve after its matching cache update", async () => {
+    const f = linked();
+    const unrelated = f.add("other.md", "");
+    f.setRefresh(false);
+    const rewritten = await f.service.rewrite(
+      await f.service.discover(f.target),
+      "https://cdn.example/a.png",
+    );
+    expect(rewritten.ok).toBe(true);
+    const refresh = f.service.waitForRefresh([f.note.path]);
+    let settled = false;
+    void refresh.then(() => {
+      settled = true;
+    });
+
+    f.emit(f.note, "![](<https://cdn.example/a.png>)", {});
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+
+    f.emitMetadata("resolve", unrelated);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+
+    f.emitMetadata("resolve", f.note);
+    await expect(refresh).resolves.toEqual({ ok: true, value: undefined });
+  });
+
+  it("uses only an all-files-resolved event that follows the matching cache update", async () => {
+    const f = linked();
+    f.setRefresh(false);
+    await f.service.rewrite(
+      await f.service.discover(f.target),
+      "https://cdn.example/a.png",
+    );
+    let settled = false;
+    const refresh = f.service.waitForRefresh([f.note.path]).then((result) => {
+      settled = true;
+      return result;
+    });
+
+    f.emitMetadata("resolved");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+    f.emit(f.note, "![](<https://cdn.example/a.png>)", {});
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+
+    f.emitMetadata("resolved");
+    await expect(refresh).resolves.toEqual({ ok: true, value: undefined });
+    expect(f.handlers.size).toBe(0);
+  });
+
+  it("does not invalidate a proof for the all-files-resolved summary event", () => {
+    const f = linked();
+    const proof = f.service.captureMutationProof();
+
+    f.emitMetadata("resolved");
+    expect(proof.isValid()).toBe(true);
+
+    f.emitMetadata("resolve", f.note);
+    expect(proof.isValid()).toBe(false);
+    proof.release();
+    expect(f.handlers.size).toBe(0);
   });
 
   it("blocks read failures and fresh verification that discovers a new dependency", async () => {
@@ -1011,6 +1122,9 @@ describe("Obsidian reference discovery and rewriting", () => {
     await vi.advanceTimersByTimeAsync(100);
     expect(settled).toBe(false);
     f.emit(f.note, "![](<https://cdn.example/a.png>)", {});
+    await vi.advanceTimersByTimeAsync(100);
+    expect(settled).toBe(false);
+    f.emitMetadata("resolve", f.note);
     expect(await waiting).toEqual({ ok: true, value: undefined });
     expect(f.handlers.size).toBe(0);
   });

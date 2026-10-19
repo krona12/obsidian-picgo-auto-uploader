@@ -76,7 +76,8 @@ const english = {
   "failure.path": "The local attachment is unavailable or changed.",
   "failure.tooLarge": "The attachment exceeds the configured size limit.",
   "failure.stability": "The attachment did not become stable in time.",
-  "failure.orphan": "No supported Markdown image reference was found.",
+  "failure.orphan":
+    "Skipped: no local image reference was found. The local file was kept.",
   "failure.reference":
     "The attachment references could not be resolved safely.",
   "failure.upload": "PicGo did not return a confirmed upload result.",
@@ -196,7 +197,7 @@ const chinese: Record<TranslationKey, string> = {
   "failure.path": "本地附件不可用或已发生变化。",
   "failure.tooLarge": "附件超过了设置的大小限制。",
   "failure.stability": "附件未能在限定时间内稳定。",
-  "failure.orphan": "未找到支持的 Markdown 图片引用。",
+  "failure.orphan": "已跳过：未找到本地图片引用，未上传并保留了本地文件。",
   "failure.reference": "无法安全解析附件引用。",
   "failure.upload": "PicGo 未返回可确认的上传结果。",
   "failure.cleanup": "无法删除私有上传临时快照；Vault 源图已保留。",

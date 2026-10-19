@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-10-19
+
+### Fixed
+
+- Wait for each rewritten note's link resolution after its matching metadata cache update, preventing normal Obsidian `changed` → `resolve` → `resolved` ordering from being reported as a source change.
+- Treat the all-files `resolved` notification as a summary instead of a new mutation, while retaining invalidation for real Vault and per-file metadata changes.
+- Stop unchanged orphan attachments from being retried and logged on every reconciliation scan. Orphans are rechecked at startup and after Markdown, Canvas, Base, or HTML reference sources change.
+
+### Changed
+
+- Report a reference-state race separately from a physical source change, then safely retry it without uploading the already confirmed image again.
+- Clarify in the status center that orphan attachments were skipped, not uploaded, and retained locally.
+
+### Safety
+
+- Permanent deletion still requires a confirmed PicGo URL, completed reference rewrites, fresh resolution and verification, zero remaining local dependencies, an unchanged SHA-256 fingerprint, exact source identity, no pending snapshot cleanup, and a valid mutation proof.
+- Upload, rewrite, refresh, verification, or deletion-precondition failures continue to retain the Vault source. A confirmed conversion still uses permanent `Vault.delete`; it is not moved into local Vault trash.
+
 ## [0.1.2] - 2026-10-19
 
 ### Fixed
@@ -57,7 +75,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Orphans, ambiguous references, upload uncertainty, concurrent changes, and failures retain the local source.
 - Timeout/disconnect results never retry automatically, and saved URLs resume rewriting without duplicate uploads.
 
-[Unreleased]: https://github.com/krona12/obsidian-picgo-auto-uploader/compare/0.1.2...HEAD
+[Unreleased]: https://github.com/krona12/obsidian-picgo-auto-uploader/compare/0.1.3...HEAD
+[0.1.3]: https://github.com/krona12/obsidian-picgo-auto-uploader/compare/0.1.2...0.1.3
 [0.1.2]: https://github.com/krona12/obsidian-picgo-auto-uploader/compare/0.1.1...0.1.2
 [0.1.1]: https://github.com/krona12/obsidian-picgo-auto-uploader/compare/0.1.0...0.1.1
 [0.1.0]: https://github.com/krona12/obsidian-picgo-auto-uploader/releases/tag/0.1.0

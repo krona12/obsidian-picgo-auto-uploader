@@ -21,8 +21,12 @@ export interface SourceVault extends Pick<
 > {
   adapter: Pick<DataAdapter, "stat"> & { getFullPath?(path: string): string };
   on(
-    name: "create" | "modify",
+    name: "create" | "modify" | "delete",
     callback: (file: TAbstractFile) => void,
+  ): EventRef;
+  on(
+    name: "rename",
+    callback: (file: TAbstractFile, oldPath: string) => void,
   ): EventRef;
 }
 
@@ -146,6 +150,11 @@ export class ObsidianVaultAdapter implements SourcePort<TFile> {
     const refs = [
       this.vault.on("create", (file) => callback(file.path)),
       this.vault.on("modify", (file) => callback(file.path)),
+      this.vault.on("rename", (file, oldPath) => {
+        callback(oldPath);
+        if (file.path !== oldPath) callback(file.path);
+      }),
+      this.vault.on("delete", (file) => callback(file.path)),
     ];
     return () => {
       for (const ref of refs) this.vault.offref(ref);

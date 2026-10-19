@@ -53,12 +53,20 @@ function redactSnapshot<T>(value: T, secret: string): T {
     ) as T;
   return value;
 }
+function canAffectReferences(path: string): boolean {
+  const extension = path.slice(path.lastIndexOf(".") + 1).toLowerCase();
+  return ["md", "canvas", "base", "html"].includes(extension);
+}
 export class AutoUploaderController {
   private running = false;
   private generation = 0;
   private cancellation = 0;
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
   private interval: ReturnType<typeof setInterval> | undefined;
+  private discoveryTimer: ReturnType<typeof setTimeout> | undefined;
+  private discoveryRevision = 0;
+  private readonly discoveryAttempts = new Map<string, number>();
+  private readonly discoveryFollowups = new Set<string>();
   private releases: (() => void)[] = [];
   private lastScanTime: number | null = null;
   private lastScan: ScanResult | null = null;
@@ -78,6 +86,7 @@ export class AutoUploaderController {
   start(): void {
     if (this.running || this.stopping) return;
     this.running = true;
+    this.discoveryRevision++;
     const generation = ++this.generation;
     let ready = false;
     this.releases.push(this.dependencies.store.subscribe(() => this.publish()));
@@ -108,6 +117,10 @@ export class AutoUploaderController {
     this.generation++;
     for (const timer of this.timers.values()) clearTimeout(timer);
     this.timers.clear();
+    clearTimeout(this.discoveryTimer);
+    this.discoveryTimer = undefined;
+    this.discoveryAttempts.clear();
+    this.discoveryFollowups.clear();
     clearInterval(this.interval);
     this.interval = undefined;
     for (const release of this.releases) release();
@@ -141,15 +154,27 @@ export class AutoUploaderController {
       return Promise.resolve({ eligible: 0, enqueued: 0, failed: 0 });
     if (this.scan) return this.scan;
     const generation = this.generation;
-    this.scan = this.scanPaths(generation, this.cancellation).finally(() => {
+    const discoveryRevision = this.discoveryRevision;
+    this.scan = this.scanPaths(
+      generation,
+      this.cancellation,
+      discoveryRevision,
+    ).finally(() => {
       this.scan = undefined;
       this.publish();
+      if (
+        this.running &&
+        generation === this.generation &&
+        discoveryRevision !== this.discoveryRevision
+      )
+        void this.scanNow();
     });
     return this.scan;
   }
   private async scanPaths(
     generation: number,
     cancellation: number,
+    discoveryRevision: number,
   ): Promise<ScanResult> {
     const result: ScanResult = { eligible: 0, enqueued: 0, failed: 0 };
     try {
@@ -192,10 +217,20 @@ export class AutoUploaderController {
         const resumableSafeFailure = Boolean(
           previous?.state === "failed" &&
           previous.failure?.retry === "safe" &&
-          ["source-changed", "discovery-blocked"].includes(
+          ["source-changed", "reference-state-changed"].includes(
             previous.failure.code,
           ),
         );
+        const discoveryTerminal = Boolean(
+          (previous?.state === "skipped" &&
+            previous.failure?.code === "orphan") ||
+          (previous?.state === "failed" &&
+            previous.failure?.retry === "safe" &&
+            previous.failure.code === "discovery-blocked"),
+        );
+        const retryDiscovery =
+          discoveryTerminal &&
+          this.discoveryAttempts.get(path) !== discoveryRevision;
         // Interrupted uploads still need uncertainty classification, and a
         // durable deletion intent must finish even if current policy changed.
         // Neither recovery path can start another upload.
@@ -214,14 +249,21 @@ export class AutoUploaderController {
             ? await this.dependencies.queue.cleanupUncertainSnapshot(path)
             : resumableSafeFailure
               ? await this.dependencies.queue.retry(path)
-              : previous?.state === "trashed"
-                ? await this.dependencies.queue.enqueueNewGeneration(path)
-                : previous?.state === "skipped" &&
-                    previous.failure?.code === "orphan"
-                  ? await this.dependencies.queue.retry(path)
+              : retryDiscovery
+                ? await this.dependencies.queue.retry(path)
+                : previous?.state === "trashed"
+                  ? await this.dependencies.queue.enqueueNewGeneration(path)
                   : await this.dependencies.queue.recover(path);
         if (!enqueued.ok) result.failed++;
-        else if (enqueued.value === "enqueued") result.enqueued++;
+        else if (enqueued.value === "enqueued") {
+          result.enqueued++;
+          if (eligible) this.discoveryAttempts.set(path, discoveryRevision);
+        } else if (
+          eligible &&
+          this.discoveryAttempts.get(path) !== discoveryRevision &&
+          this.dependencies.queue.hasReservation(path)
+        )
+          this.followDiscoveryAfterActivePath(path, generation, cancellation);
       }
     } catch {
       result.failed++;
@@ -230,18 +272,37 @@ export class AutoUploaderController {
     this.lastScan = result;
     return { ...result };
   }
-  retry(
+  async retry(
     path: string,
     options: { acknowledgeUncertain?: boolean } = {},
   ): Promise<EnqueueResult> {
-    return this.running
-      ? this.dependencies.queue.retry(path, options)
-      : Promise.resolve({ ok: false, error: { code: "not-retryable" } });
+    if (!this.running) return { ok: false, error: { code: "not-retryable" } };
+    const revision = this.discoveryRevision;
+    const result = await this.dependencies.queue.retry(path, options);
+    if (result.ok && result.value === "enqueued")
+      this.discoveryAttempts.set(path, revision);
+    return result;
   }
-  retrySafeFailures(): Promise<EnqueueResult[]> {
-    return this.running
-      ? this.dependencies.queue.retrySafeFailures()
-      : Promise.resolve([]);
+  async retrySafeFailures(): Promise<EnqueueResult[]> {
+    if (!this.running) return [];
+    const revision = this.discoveryRevision;
+    const paths = this.dependencies.store
+      .snapshot()
+      .jobs.filter(
+        (job) =>
+          isTerminalState(job.state) &&
+          job.state !== "uncertain" &&
+          job.failure?.retry === "safe",
+      )
+      .map((job) => job.vaultPath);
+    const results = await Promise.all(
+      paths.map((path) => this.dependencies.queue.retry(path)),
+    );
+    results.forEach((result, index) => {
+      if (result?.ok && result.value === "enqueued")
+        this.discoveryAttempts.set(paths[index]!, revision);
+    });
+    return results;
   }
   cancelPending(): Promise<void> {
     this.cancellation++;
@@ -286,13 +347,25 @@ export class AutoUploaderController {
   }
   private event(input: string): void {
     const path = normalizeVaultPath(input);
-    if (
-      !this.running ||
-      !this.dependencies.settings.enabled ||
-      !path ||
-      !isEligibleAttachment(path, this.dependencies.settings)
-    )
+    if (!this.running || !this.dependencies.settings.enabled || !path) return;
+    if (canAffectReferences(path)) {
+      this.discoveryRevision++;
+      clearTimeout(this.discoveryTimer);
+      const generation = this.generation;
+      const cancellation = this.cancellation;
+      this.discoveryTimer = setTimeout(() => {
+        this.discoveryTimer = undefined;
+        if (
+          this.running &&
+          generation === this.generation &&
+          cancellation === this.cancellation &&
+          this.dependencies.settings.enabled
+        )
+          void this.scanNow();
+      }, this.dependencies.settings.quietPeriodMs);
       return;
+    }
+    if (!isEligibleAttachment(path, this.dependencies.settings)) return;
     clearTimeout(this.timers.get(path));
     const generation = this.generation;
     const cancellation = this.cancellation;
@@ -317,6 +390,7 @@ export class AutoUploaderController {
     let dirty = false;
     while (active()) {
       const job = this.job(path);
+      const discoveryRevision = this.discoveryRevision;
       let enqueued: EnqueueResult;
       if (job && isTerminalState(job.state)) {
         if (job.state === "trashed") {
@@ -342,11 +416,40 @@ export class AutoUploaderController {
       } else if (job && job.state !== "queued")
         enqueued = await this.dependencies.queue.recover(path);
       else enqueued = await this.dependencies.queue.enqueue(path);
-      if (!enqueued.ok || enqueued.value !== "duplicate") return;
+      if (!enqueued.ok) return;
+      if (enqueued.value === "enqueued") {
+        this.discoveryAttempts.set(path, discoveryRevision);
+        return;
+      }
       // The event arrived while this path already had an owner. Re-evaluate the
       // durable result after that exact worker settles, even if metadata stayed equal.
       dirty = true;
       await this.dependencies.queue.waitForPath(path);
     }
+  }
+
+  private followDiscoveryAfterActivePath(
+    path: string,
+    generation: number,
+    cancellation: number,
+  ): void {
+    if (this.discoveryFollowups.has(path)) return;
+    this.discoveryFollowups.add(path);
+    void this.dependencies.queue
+      .waitForPath(path)
+      .then(() => {
+        this.discoveryFollowups.delete(path);
+        if (
+          this.running &&
+          generation === this.generation &&
+          cancellation === this.cancellation &&
+          this.dependencies.settings.enabled &&
+          this.discoveryAttempts.get(path) !== this.discoveryRevision
+        )
+          void this.scanNow();
+      })
+      .catch(() => {
+        this.discoveryFollowups.delete(path);
+      });
   }
 }

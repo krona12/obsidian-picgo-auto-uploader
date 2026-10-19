@@ -45,7 +45,7 @@ The target must resolve to the exact attachment in the source note's context. Th
 
 Within Markdown files, local HTML `<img>`, reference-style/block links, malformed embeds, and other raw dependencies are not rewritten but block deletion only when they can plausibly identify the current target. Proven external HTTP(S) HTML images and unrelated broken image syntax do not block every attachment. In addition to Markdown, only `.canvas`, `.base`, and `.html` files are scanned conservatively for a plausible path or file-name dependency; a target-specific match blocks deletion.
 
-Other formats, including Excalidraw and unknown plugin data, are not interpreted or scanned in 0.1.2. References stored only in unknown plugin data are not detected and are not protected by the deletion check. Do not enable automatic processing for attachments relied on only by such formats; keep backups and test with a small folder. Missing/stale Markdown metadata that may involve the target, unreadable protected files, overlapping target offsets, or concurrent edits also leave the source in place.
+Other formats, including Excalidraw and unknown plugin data, are not interpreted or scanned in 0.1.3. References stored only in unknown plugin data are not detected and are not protected by the deletion check. Do not enable automatic processing for attachments relied on only by such formats; keep backups and test with a small folder. Missing/stale Markdown metadata that may involve the target, unreadable protected files, overlapping target offsets, or concurrent edits also leave the source in place.
 
 ## Deletion safety
 
@@ -65,9 +65,9 @@ Any upload, rewrite, verification, fingerprint, lifecycle, or pre-delete error r
 
 The plugin reads eligible Vault images, Markdown notes, and Obsidian metadata. It sends an absolute path to a short-lived private snapshot and, when configured, an optional bearer secret only to the configured PicGo endpoint. PicGo then reads the snapshot and sends its bytes to the image provider selected by the user.
 
-Version 0.1.2 has no telemetry and performs no returned-URL probe. It does not contact an analytics service. Logs and exported diagnostics redact configured secrets and absolute paths; they do not contain image bytes or arbitrary PicGo response bodies.
+Version 0.1.3 has no telemetry and performs no returned-URL probe. It does not contact an analytics service. Logs and exported diagnostics redact configured secrets and absolute paths; they do not contain image bytes or arbitrary PicGo response bodies.
 
-To remain compatible with Obsidian 1.7.2, version 0.1.2 does not rely on newer SecretStorage APIs. The optional secret is plaintext in this plugin's local `data.json`; syncing that file can expose it. Exclude `.obsidian/plugins/picgo-auto-uploader/data.json` from synchronization or do not store a secret if that risk is unacceptable.
+To remain compatible with Obsidian 1.7.2, version 0.1.3 does not rely on newer SecretStorage APIs. The optional secret is plaintext in this plugin's local `data.json`; syncing that file can expose it. Exclude `.obsidian/plugins/picgo-auto-uploader/data.json` from synchronization or do not store a secret if that risk is unacceptable.
 
 Plain HTTP is safe from passive network observers only when it stays on the local machine. A non-loopback HTTP endpoint exposes paths and credentials on the network, so the settings page requires explicit acknowledgement. Prefer loopback or HTTPS.
 
@@ -111,6 +111,8 @@ Start PicGo, enable its HTTP server, confirm the port, and use **Test connection
 ### An image was skipped
 
 Confirm that Vault-wide discovery is enabled (or that the image is inside a configured fallback folder), the extension is enabled, the file is below the size limit, and it has a supported Markdown image embed. Orphans and ambiguous references are intentionally retained.
+
+If another image-upload plugin rewrites the embed first but leaves the local source behind, this plugin sees an orphan and deliberately keeps it. Avoid running overlapping automatic uploaders; a matching remote filename alone is not sufficient proof for permanent local deletion.
 
 ### A job is uncertain
 

@@ -142,6 +142,43 @@ describe("status UI", () => {
     },
   );
 
+  it.each([
+    ["en", "The rewritten references could not be verified."],
+    ["zh-CN", "无法验证改写后的引用。"],
+  ])(
+    "renders reference-state races as verification failures in %s",
+    (locale, expected) => {
+      const snapshot: ControllerSnapshot = Object.freeze({
+        ...empty,
+        counts: { failed: 1 },
+        jobs: [
+          Object.freeze({
+            vaultPath: "attachments/image.png",
+            state: "failed",
+            createdAt: 1,
+            updatedAt: 2,
+            rewrittenNotePaths: ["note.md"],
+            rewrittenReferenceCount: 1,
+            failure: Object.freeze({
+              code: "reference-state-changed",
+              stage: "verify",
+              message: "safe",
+              retry: "safe",
+            }),
+          }),
+        ],
+      });
+      const modal = new StatusModal(
+        {} as never,
+        actions({ snapshot: () => snapshot }),
+        locale,
+      );
+      modal.open();
+      expect(modal.contentEl.textContent).toContain(expected);
+      modal.close();
+    },
+  );
+
   it("aborts heartbeat and unsubscribes on close", () => {
     let signal: AbortSignal | undefined;
     const unsubscribe = vi.fn();

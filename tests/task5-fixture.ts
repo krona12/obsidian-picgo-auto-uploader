@@ -123,9 +123,14 @@ export function fixture(
       text.set(file, next);
       writes.push(file.path);
       caches.set(file, {});
-      if (refresh)
+      if (refresh) {
         for (const listener of metadataListeners.values())
           if (listener.name === "changed") listener.callback(file, next, {});
+        for (const listener of metadataListeners.values())
+          if (listener.name === "resolve") listener.callback(file);
+        for (const listener of metadataListeners.values())
+          if (listener.name === "resolved") listener.callback();
+      }
       afterWrite?.();
       return next;
     },

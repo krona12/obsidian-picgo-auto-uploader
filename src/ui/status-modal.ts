@@ -41,6 +41,7 @@ const failureCopy = new Map<string, Parameters<typeof t>[1]>([
   ["source-unavailable", "failure.path"],
   ["file-missing", "failure.path"],
   ["source-changed", "failure.path"],
+  ["reference-state-changed", "failure.verify"],
   ["invalid-target", "failure.path"],
   ["file-too-large", "failure.tooLarge"],
   ["invalid-stat", "failure.stability"],

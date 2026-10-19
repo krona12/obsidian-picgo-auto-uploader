@@ -424,6 +424,9 @@ export class AttachmentProcessor<T> {
       const fingerprint = await source.fingerprint(file);
       if (await cancelled()) return;
       job = current()!;
+      const exactSourceExists = source.get(path) === file;
+      const fingerprintMatches = sameFingerprint(job.fingerprint, fingerprint);
+      const referenceProofValid = referenceProof.isValid();
       if (
         !canTrash({
           remoteUrl: job.remoteUrl,
@@ -434,15 +437,19 @@ export class AttachmentProcessor<T> {
           currentFingerprint: fingerprint,
           localSnapshotClean: job.pendingSnapshotId === undefined,
           active: !signal.aborted,
-          exactSourceExists: source.get(path) === file,
-          referenceProofValid: referenceProof.isValid(),
+          exactSourceExists,
+          referenceProofValid,
         })
-      )
+      ) {
+        if (signal.aborted) return await fail("aborted", "safe", "cancelled");
         return await fail(
-          signal.aborted ? "aborted" : "source-changed",
-          "safe",
-          signal.aborted ? "cancelled" : "failed",
+          !exactSourceExists || !fingerprintMatches
+            ? "source-changed"
+            : !referenceProofValid
+              ? "reference-state-changed"
+              : "source-changed",
         );
+      }
       stage = "trash";
       await store.transition(path, "deleting");
       if (signal.aborted || !referenceProof.isValid()) return;

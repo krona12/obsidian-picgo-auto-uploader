@@ -695,7 +695,10 @@ describe("attachment processing with real collaborators", () => {
   it("physical source changes after fresh verification still prevent trash", async () => {
     const f = fixture();
     f.statHook(() => {
-      if (f.statReads() === 6) f.source.stat.mtime++;
+      if (f.statReads() === 6) {
+        f.source.stat.mtime++;
+        f.vaultEvent("modify", f.source);
+      }
     });
     await f.run();
     expect(f.job()).toMatchObject({
@@ -745,7 +748,10 @@ describe("attachment processing with real collaborators", () => {
       "![[attachments/image.png]]",
     );
     expect(f.trash).toEqual([]);
-    expect(f.job().state).toBe("failed");
+    expect(f.job()).toMatchObject({
+      state: "failed",
+      failure: { code: "reference-state-changed", stage: "verify" },
+    });
   });
   it.each(["modify", "rename", "delete"] as const)(
     "invalidates final reference proof on protected-file %s",
@@ -761,7 +767,10 @@ describe("attachment processing with real collaborators", () => {
       });
       await f.run();
       expect(f.trash).toEqual([]);
-      expect(f.job().state).toBe("failed");
+      expect(f.job()).toMatchObject({
+        state: "failed",
+        failure: { code: "reference-state-changed", stage: "verify" },
+      });
     },
   );
   it("invalidates final reference proof on unrelated attachment topology changes", async () => {
@@ -773,7 +782,22 @@ describe("attachment processing with real collaborators", () => {
     });
     await f.run();
     expect(f.trash).toEqual([]);
-    expect(f.job().state).toBe("failed");
+    expect(f.job()).toMatchObject({
+      state: "failed",
+      failure: { code: "reference-state-changed", stage: "verify" },
+    });
+  });
+  it("does not reject a rewrite for its trailing all-files-resolved notification", async () => {
+    const f = fixture();
+    f.afterWrite(() => f.metadataEvent("resolve"));
+    f.statHook(() => {
+      if (f.statReads() === 6) f.metadataEvent("resolved");
+    });
+
+    await f.run();
+
+    expect(f.job().state).toBe("trashed");
+    expect(f.trash).toEqual(["attachments/image.png"]);
   });
   it("invalidates final reference proof on metadata-only resolution changes", async () => {
     const f = fixture();
@@ -782,7 +806,10 @@ describe("attachment processing with real collaborators", () => {
     });
     await f.run();
     expect(f.trash).toEqual([]);
-    expect(f.job().state).toBe("failed");
+    expect(f.job()).toMatchObject({
+      state: "failed",
+      failure: { code: "reference-state-changed", stage: "verify" },
+    });
   });
   it("unexpected stability exceptions settle safely", async () => {
     const f = fixture();

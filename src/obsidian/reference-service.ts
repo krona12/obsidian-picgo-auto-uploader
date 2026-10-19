@@ -65,6 +65,7 @@ type RefreshResult = Result<void, ReferenceBlocker>;
 interface RefreshWatch {
   targetPath: string;
   promise: Promise<RefreshResult>;
+  indexed: boolean;
   result?: RefreshResult;
   finish(result: RefreshResult): void;
 }
@@ -458,8 +459,6 @@ export class ObsidianReferenceService {
       releases.push(() => this.metadata.offref(deleted));
       const resolve = this.metadata.on("resolve", invalidate);
       releases.push(() => this.metadata.offref(resolve));
-      const resolved = this.metadata.on("resolved", invalidate);
-      releases.push(() => this.metadata.offref(resolved));
     } catch {
       valid = false;
       for (const release of releases.splice(0)) release();
@@ -848,15 +847,18 @@ export class ObsidianReferenceService {
     const promise = new Promise<RefreshResult>((resolve) => {
       complete = resolve;
     });
-    const resources: { ref?: EventRef; timer?: ReturnType<typeof setTimeout> } =
-      {};
+    const resources: {
+      refs: EventRef[];
+      timer?: ReturnType<typeof setTimeout>;
+    } = { refs: [] };
     const watch: RefreshWatch = {
       targetPath,
       promise,
+      indexed: false,
       finish: (result) => {
         if (watch.result) return;
         watch.result = result;
-        if (resources.ref) this.metadata.offref(resources.ref);
+        for (const ref of resources.refs.splice(0)) this.metadata.offref(ref);
         clearTimeout(resources.timer);
         complete(result);
       },
@@ -864,10 +866,22 @@ export class ObsidianReferenceService {
     this.refreshes.set(file.path, watch);
     // This subscription runs in the process callback, before Vault can commit and
     // publish changed. Matching event data proves which text was indexed.
-    resources.ref = this.metadata.on("changed", (changed, data) => {
-      if (changed === file && data === expected)
-        watch.finish({ ok: true, value: undefined });
-    });
+    resources.refs.push(
+      this.metadata.on("changed", (changed, data) => {
+        if (changed === file && data === expected) watch.indexed = true;
+      }),
+    );
+    resources.refs.push(
+      this.metadata.on("resolve", (resolved) => {
+        if (watch.indexed && resolved === file)
+          watch.finish({ ok: true, value: undefined });
+      }),
+    );
+    resources.refs.push(
+      this.metadata.on("resolved", () => {
+        if (watch.indexed) watch.finish({ ok: true, value: undefined });
+      }),
+    );
     resources.timer = setTimeout(
       () =>
         watch.finish({
