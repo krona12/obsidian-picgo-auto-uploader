@@ -1,10 +1,15 @@
 import { spawnSync } from "node:child_process";
 import {
+  copyFileSync,
+  existsSync,
   lstatSync,
   mkdtempSync,
+  mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -48,6 +53,33 @@ function releaseSnapshot(): Map<string, Buffer> {
       readFileSync(join(releaseDirectory, name)),
     ]),
   );
+}
+
+function snapshotDirectory(directory: string): Map<string, Buffer> {
+  return new Map(
+    readdirSync(directory).map((name) => [
+      name,
+      readFileSync(join(directory, name)),
+    ]),
+  );
+}
+
+function createAuditFixture(): { root: string; script: string } {
+  const root = mkdtempSync(join(tmpdir(), "picgo-audit-fixture-"));
+  mkdirSync(join(root, "scripts"));
+  mkdirSync(join(root, "release"));
+  copyFileSync(releaseScript, join(root, "scripts", "check-release.mjs"));
+  for (const name of [
+    "package.json",
+    "manifest.json",
+    "versions.json",
+    ...expectedAssets,
+  ]) {
+    copyFileSync(join(repositoryRoot, name), join(root, name));
+  }
+  for (const name of expectedAssets)
+    copyFileSync(join(root, name), join(root, "release", name));
+  return { root, script: join(root, "scripts", "check-release.mjs") };
 }
 
 function expectFailedWithoutReplacing(args: string[]): void {
@@ -164,7 +196,10 @@ describe("repository release files", () => {
             /no telemetry/i,
             /no returned-URL probe/i,
             /data\.json/i,
+            /compatible.*Obsidian 1\.7\.2.*SecretStorage/is,
             /non-loopback HTTP/i,
+            /only.*\.canvas.*\.base.*\.html.*scanned/is,
+            /unknown plugin data.*not detected.*not protected/is,
             /main\.js.*manifest\.json.*styles\.css/is,
             /source ZIP/i,
             /Open PicGo Auto Uploader status/i,
@@ -195,7 +230,10 @@ describe("repository release files", () => {
             /不收集遥测/,
             /不会探测返回的 URL/,
             /data\.json/,
+            /兼容 Obsidian 1\.7\.2.*SecretStorage/s,
             /非本机.*HTTP/s,
+            /仅.*\.canvas.*\.base.*\.html.*扫描/s,
+            /未知插件数据.*无法检测.*不受保护/s,
             /main\.js.*manifest\.json.*styles\.css/is,
             /源码 ZIP/,
             /Open PicGo Auto Uploader status/,
@@ -246,6 +284,66 @@ describe("release package", () => {
     expect(assets).not.toMatch(
       /(?:ghp|github_pat|sk-[A-Za-z0-9_-]*)_[A-Za-z0-9_-]{20,}/,
     );
+  });
+
+  test("rejects a JavaScript-escaped Windows checkout path before replacing release", () => {
+    const fixture = createAuditFixture();
+    try {
+      const before = snapshotDirectory(join(fixture.root, "release"));
+      const escapedRoot = JSON.stringify(fixture.root).slice(1, -1);
+      writeFileSync(
+        join(fixture.root, "main.js"),
+        `globalThis.syntheticPath = "${escapedRoot}";\n`,
+        "utf8",
+      );
+
+      const result = run(process.execPath, [fixture.script], {
+        cwd: fixture.root,
+      });
+
+      expect(result.status, `${result.stdout}\n${result.stderr}`).not.toBe(0);
+      expect(result.stderr).toContain("contains a private local path");
+      expect(snapshotDirectory(join(fixture.root, "release"))).toEqual(before);
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  test("retains the last good backup when install and rollback both fail", () => {
+    const fixture = createAuditFixture();
+    try {
+      const before = snapshotDirectory(join(fixture.root, "release"));
+      const result = run(process.execPath, [fixture.script], {
+        cwd: fixture.root,
+        env: {
+          ...process.env,
+          NODE_ENV: "test",
+          PICGO_RELEASE_TEST_FAULTS: "install,rollback",
+        },
+      });
+
+      expect(result.status, `${result.stdout}\n${result.stderr}`).not.toBe(0);
+      expect(existsSync(join(fixture.root, "release"))).toBe(false);
+      const backups = readdirSync(fixture.root).filter((name) =>
+        name.startsWith(".release-backup-"),
+      );
+      expect(backups).toHaveLength(1);
+      expect(snapshotDirectory(join(fixture.root, backups[0]!))).toEqual(
+        before,
+      );
+      expect(
+        readdirSync(fixture.root).some((name) =>
+          name.startsWith(".release-stage-"),
+        ),
+      ).toBe(false);
+
+      renameSync(
+        join(fixture.root, backups[0]!),
+        join(fixture.root, "release"),
+      );
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
   });
 
   test("rejects mismatched and v-prefixed tags without replacing valid assets", () => {

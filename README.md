@@ -43,7 +43,9 @@ Supported image embeds include:
 
 The target must resolve to the exact attachment in the source note's context. The plugin preserves Markdown alt text, titles, and Obsidian display/size text while converting to an external image embed.
 
-HTML `<img>`, reference-style/block Markdown links, malformed embeds, Canvas, Base, Excalidraw, and arbitrary plugin data are unsupported. A plausible ambiguous or unsupported reference conservatively blocks deletion. Missing/stale metadata, unreadable notes, overlapping offsets, or concurrent edits also leave the source in place.
+Within Markdown files, HTML `<img>`, reference-style/block links, malformed embeds, and other plausible raw dependencies are not rewritten but do block deletion. In addition to Markdown, only `.canvas`, `.base`, and `.html` files are scanned conservatively for a plausible path or file-name dependency; a match blocks deletion.
+
+Other formats, including Excalidraw and unknown plugin data, are not interpreted or scanned in 0.1.0. References stored only in unknown plugin data are not detected and are not protected by the deletion check. Do not enable automatic processing for attachments relied on only by such formats; keep backups and test with a small folder. Missing/stale Markdown metadata, unreadable protected files, overlapping offsets, or concurrent edits also leave the source in place.
 
 ## Deletion safety
 
@@ -64,7 +66,7 @@ The plugin reads eligible Vault images, Markdown notes, and Obsidian metadata. I
 
 Version 0.1.0 has no telemetry and performs no returned-URL probe. It does not contact an analytics service. Logs and exported diagnostics redact configured secrets and absolute paths; they do not contain image bytes or arbitrary PicGo response bodies.
 
-Obsidian has no plugin secret store. The optional secret is plaintext in this plugin's local `data.json`; syncing that file can expose it. Exclude `.obsidian/plugins/picgo-auto-uploader/data.json` from synchronization or do not store a secret if that risk is unacceptable.
+To remain compatible with Obsidian 1.7.2, version 0.1.0 does not rely on newer SecretStorage APIs. The optional secret is plaintext in this plugin's local `data.json`; syncing that file can expose it. Exclude `.obsidian/plugins/picgo-auto-uploader/data.json` from synchronization or do not store a secret if that risk is unacceptable.
 
 Plain HTTP is safe from passive network observers only when it stays on the local machine. A non-loopback HTTP endpoint exposes paths and credentials on the network, so the settings page requires explicit acknowledgement. Prefer loopback or HTTPS.
 

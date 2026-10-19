@@ -61,7 +61,30 @@ function removeManaged(path, prefix) {
 function pathVariants(value) {
   if (!value) return [];
   const normalized = resolve(value);
-  return [normalized, normalized.replaceAll("\\", "/")];
+  const forward = normalized.replaceAll("\\", "/");
+  return [
+    normalized,
+    forward,
+    JSON.stringify(normalized).slice(1, -1),
+    JSON.stringify(forward).slice(1, -1),
+  ];
+}
+
+function injectTestFault(name) {
+  if (process.env.NODE_ENV !== "test") return;
+  const faults = new Set(
+    (process.env.PICGO_RELEASE_TEST_FAULTS ?? "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean),
+  );
+  if (faults.has(name)) throw new Error(`Injected ${name} failure.`);
+}
+
+function removeInstalledRelease() {
+  if (resolve(releasePath) !== resolve(join(root, "release")))
+    fail("refusing to remove an unexpected release path.");
+  rmSync(releasePath, { recursive: true, force: true });
 }
 
 function scanAsset(name, content, privatePaths) {
@@ -150,32 +173,66 @@ function main() {
     .flatMap(pathVariants)
     .filter((value, index, values) => value && values.indexOf(value) === index);
 
+  let stagingOwned = false;
+  let backupHoldsPrevious = false;
+  let installedNew = false;
   try {
     mkdirSync(staging);
+    stagingOwned = true;
     for (const name of expectedAssets)
       copyFileSync(join(root, name), join(staging, name));
     const sizes = validateDirectory(staging, privatePaths);
 
-    let backedUp = false;
-    try {
-      if (existsSync(releasePath)) {
-        renameSync(releasePath, backup);
-        backedUp = true;
-      }
-      renameSync(staging, releasePath);
-      if (backedUp) removeManaged(backup, ".release-backup-");
-    } catch (error) {
-      if (!existsSync(releasePath) && backedUp && existsSync(backup))
-        renameSync(backup, releasePath);
-      throw error;
+    if (existsSync(backup))
+      fail("refusing to replace a pre-existing backup path.");
+    if (existsSync(releasePath)) {
+      renameSync(releasePath, backup);
+      backupHoldsPrevious = true;
+    }
+    injectTestFault("install");
+    renameSync(staging, releasePath);
+    stagingOwned = false;
+    installedNew = true;
+    if (backupHoldsPrevious) {
+      removeManaged(backup, ".release-backup-");
+      backupHoldsPrevious = false;
     }
 
     console.log(
       `Verified release ${tag}: ${sizes.map(([name, size]) => `${name} (${size} bytes)`).join(", ")}`,
     );
+  } catch (error) {
+    let rollbackError;
+    if (backupHoldsPrevious) {
+      try {
+        if (installedNew && existsSync(releasePath)) {
+          removeInstalledRelease();
+          installedNew = false;
+        }
+        if (existsSync(releasePath))
+          throw new Error("The replacement release could not be removed.");
+        injectTestFault("rollback");
+        renameSync(backup, releasePath);
+        backupHoldsPrevious = false;
+      } catch (failure) {
+        rollbackError = failure;
+      }
+    }
+    if (rollbackError) {
+      const original =
+        error instanceof Error ? error.message : "Install failed.";
+      const rollback =
+        rollbackError instanceof Error
+          ? rollbackError.message
+          : "Rollback failed.";
+      throw new Error(
+        `${original} Rollback failed: ${rollback} The previous release remains at ${basename(backup)}.`,
+      );
+    }
+    throw error;
   } finally {
-    if (existsSync(staging)) removeManaged(staging, ".release-stage-");
-    if (existsSync(backup)) removeManaged(backup, ".release-backup-");
+    if (stagingOwned && existsSync(staging))
+      removeManaged(staging, ".release-stage-");
   }
 }
 
