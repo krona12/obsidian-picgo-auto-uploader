@@ -112,16 +112,28 @@ export class AutoUploaderController {
     this.interval = undefined;
     for (const release of this.releases) release();
     this.releases = [];
-    this.stopping = this.dependencies.queue
-      .cancelPending()
-      .then(async () => {
+    // Cancellation persistence may fail after signals were aborted. It must not
+    // skip the scan or the active worker's drain, or leak a background rejection.
+    this.stopping = (async () => {
+      try {
+        await this.dependencies.queue.cancelPending();
+      } catch {
+        /* Continue draining. */
+      }
+      try {
         await this.scan;
+      } catch {
+        /* The scan failure cannot skip queue drain. */
+      }
+      try {
         await this.dependencies.queue.drain();
-      })
-      .finally(() => {
-        this.stopping = undefined;
-        this.publish();
-      });
+      } catch {
+        /* Stop still settles normally. */
+      }
+    })().finally(() => {
+      this.stopping = undefined;
+      this.publish();
+    });
     return this.stopping;
   }
   scanNow(): Promise<ScanResult> {
@@ -141,7 +153,15 @@ export class AutoUploaderController {
   ): Promise<ScanResult> {
     const result: ScanResult = { eligible: 0, enqueued: 0, failed: 0 };
     try {
-      const paths = [...new Set(this.dependencies.lifecycle.listPaths())];
+      const paths = [
+        ...new Set([
+          ...this.dependencies.lifecycle.listPaths(),
+          ...this.dependencies.store
+            .snapshot()
+            .jobs.filter((job) => !isTerminalState(job.state))
+            .map((job) => job.vaultPath),
+        ]),
+      ];
       for (const path of paths) {
         if (
           !this.running ||
@@ -149,13 +169,16 @@ export class AutoUploaderController {
           cancellation !== this.cancellation
         )
           break;
-        if (!isEligibleAttachment(path, this.dependencies.settings)) continue;
-        result.eligible++;
         const previous = this.job(path);
+        const eligible = isEligibleAttachment(path, this.dependencies.settings);
+        // An interrupted dispatch still needs uncertainty classification when
+        // configuration changed; this recovery can never start another upload.
+        if (!eligible && previous?.state !== "uploading") continue;
+        if (eligible) result.eligible++;
         const enqueued =
           previous?.state === "skipped" && previous.failure?.code === "orphan"
             ? await this.dependencies.queue.retry(path)
-            : await this.dependencies.queue.enqueue(path);
+            : await this.dependencies.queue.recover(path);
         if (!enqueued.ok) result.failed++;
         else if (enqueued.value === "enqueued") result.enqueued++;
       }

@@ -328,4 +328,215 @@ describe("durable job store", () => {
     expect(store.snapshot().jobs).toHaveLength(500);
     expect(store.snapshot().jobs[0]!.vaultPath).toBe("a1.png");
   });
+
+  it.each([
+    "waiting-stable",
+    "discovering-references",
+    "rewriting",
+    "verifying",
+  ] as const)(
+    "explicitly recovers interrupted %s without altering durable checkpoints",
+    async (state) => {
+      const original = {
+        ...job("attachments/a.png", state),
+        remoteUrl: "https://cdn.test/a.png",
+        fingerprint: { size: 10, mtime: 20 },
+        rewrittenNotePaths: ["one.md", "two.md"],
+        rewrittenReferenceCount: 3,
+      };
+      const persistence = memory({ jobs: [original], logs: [] });
+      const store = new JobStore(persistence, { now: () => 100 });
+      await store.hydrate();
+      await expect(
+        store.transition(original.vaultPath, "queued"),
+      ).rejects.toThrow();
+      await store.recoverInterrupted(original.vaultPath);
+      expect(persistence.saved?.jobs[0]).toEqual({
+        ...original,
+        state: "queued",
+        updatedAt: 100,
+      });
+    },
+  );
+  it.each(["uploading", "rewriting", "verifying"] as const)(
+    "makes interrupted %s without a URL uncertain rather than risking duplicate upload",
+    async (state) => {
+      const persistence = memory({
+        jobs: [job("attachments/a.png", state)],
+        logs: [],
+      });
+      const store = new JobStore(persistence);
+      await store.hydrate();
+      await store.recoverInterrupted("attachments/a.png");
+      expect(store.snapshot().jobs[0]).toMatchObject({
+        state: "uncertain",
+        failure: { stage: "upload", retry: "uncertain" },
+      });
+      await expect(
+        store.transition("attachments/a.png", "queued"),
+      ).rejects.toThrow();
+    },
+  );
+  it.each([
+    "queued",
+    "failed",
+    "uncertain",
+    "skipped",
+    "cancelled",
+    "trashed",
+  ] as const)(
+    "cannot use interrupted recovery to bypass retry policy for %s",
+    async (state) => {
+      const persistence = memory({
+        jobs: [job("attachments/a.png", state)],
+        logs: [],
+      });
+      const store = new JobStore(persistence);
+      await store.hydrate();
+      await expect(
+        store.recoverInterrupted("attachments/a.png"),
+      ).rejects.toThrow();
+      expect(store.snapshot().jobs[0]?.state).toBe(state);
+    },
+  );
+  it("failed recovery saves do not publish a queued state or lose checkpoints", async () => {
+    const original = {
+      ...job("attachments/a.png", "rewriting"),
+      remoteUrl: "https://cdn.test/a.png",
+      fingerprint: { size: 2, mtime: 3 },
+      rewrittenNotePaths: ["note.md"],
+      rewrittenReferenceCount: 1,
+    };
+    const store = new JobStore({
+      async load() {
+        return { jobs: [original], logs: [] };
+      },
+      async save() {
+        throw new Error("disk");
+      },
+    });
+    await store.hydrate();
+    await expect(store.recoverInterrupted(original.vaultPath)).rejects.toThrow(
+      "disk",
+    );
+    expect(store.snapshot().jobs[0]).toEqual(original);
+  });
+  it.each([
+    ["skipped", "info"],
+    ["failed", "error"],
+    ["uncertain", "error"],
+    ["cancelled", "warn"],
+  ] as const)(
+    "atomically logs each %s transition exactly once at %s level",
+    async (state, level) => {
+      const persistence = memory();
+      const store = new JobStore(persistence, { now: () => 200 });
+      await store.upsert(job());
+      const failure = {
+        code: "safe-code",
+        stage: "upload" as const,
+        message: "Safe failure message.",
+        retry:
+          state === "uncertain" ? ("uncertain" as const) : ("safe" as const),
+      };
+      await store.transition("attachments/a.png", state, { failure });
+      expect(persistence.saved).toMatchObject({
+        jobs: [{ state, failure }],
+        logs: [
+          {
+            timestamp: 200,
+            level,
+            stage: "upload",
+            code: "safe-code",
+            message: "Safe failure message.",
+            vaultPath: "attachments/a.png",
+          },
+        ],
+      });
+      await expect(
+        store.transition("attachments/a.png", state, { failure }),
+      ).rejects.toThrow();
+      expect(store.snapshot().logs).toHaveLength(1);
+    },
+  );
+  it("atomically logs recovery uncertainty without uploading or duplicating on repeated recovery", async () => {
+    const store = new JobStore(
+      memory({ jobs: [job("attachments/a.png", "uploading")], logs: [] }),
+    );
+    await store.hydrate();
+    await store.recoverInterrupted("attachments/a.png");
+    expect(store.snapshot().logs).toMatchObject([
+      {
+        level: "error",
+        stage: "upload",
+        code: "interrupted-upload",
+        vaultPath: "attachments/a.png",
+      },
+    ]);
+    await expect(
+      store.recoverInterrupted("attachments/a.png"),
+    ).rejects.toThrow();
+    expect(store.snapshot().logs).toHaveLength(1);
+  });
+  it("an interrupted uploading state stays uncertain even if a URL was already present", async () => {
+    const original = {
+      ...job("attachments/a.png", "uploading"),
+      remoteUrl: "https://cdn.test/a.png",
+      fingerprint: { size: 1, mtime: 2 },
+      rewrittenNotePaths: ["note.md"],
+      rewrittenReferenceCount: 1,
+    };
+    const store = new JobStore(memory({ jobs: [original], logs: [] }));
+    await store.hydrate();
+    await store.recoverInterrupted(original.vaultPath);
+    expect(store.snapshot().jobs[0]).toMatchObject({
+      ...original,
+      state: "uncertain",
+      updatedAt: expect.any(Number),
+      failure: { retry: "uncertain" },
+    });
+  });
+  it("pre-upload state with rewrite evidence but no saved URL is uncertain", async () => {
+    const store = new JobStore(
+      memory({
+        jobs: [
+          {
+            ...job("attachments/a.png", "discovering-references"),
+            rewrittenReferenceCount: 1,
+            rewrittenNotePaths: ["note.md"],
+          },
+        ],
+        logs: [],
+      }),
+    );
+    await store.hydrate();
+    await store.recoverInterrupted("attachments/a.png");
+    expect(store.snapshot().jobs[0]).toMatchObject({
+      state: "uncertain",
+      failure: { retry: "uncertain" },
+    });
+  });
+  it("does not publish either a terminal state or its failure log when the atomic save fails", async () => {
+    const original = job("attachments/a.png", "uploading");
+    const store = new JobStore({
+      async load() {
+        return { jobs: [original], logs: [] };
+      },
+      async save() {
+        throw new Error("disk");
+      },
+    });
+    await store.hydrate();
+    await expect(
+      store.transition(original.vaultPath, "uncertain", {
+        failure: {
+          code: "timeout",
+          stage: "upload",
+          message: "Upload was interrupted.",
+          retry: "uncertain",
+        },
+      }),
+    ).rejects.toThrow("disk");
+    expect(store.snapshot()).toEqual({ jobs: [original], logs: [] });
+  });
 });

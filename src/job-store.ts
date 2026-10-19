@@ -253,6 +253,7 @@ export class JobStore {
       if (!validJob(next)) throw new Error("Invalid job update.");
       Object.assign(job, next);
       if (retry) delete job.failure;
+      this.logFailure(draft, job);
       return job;
     });
   }
@@ -264,6 +265,65 @@ export class JobStore {
       if (captured.vaultPath)
         captured.vaultPath = this.path(captured.vaultPath);
       draft.logs.push(captured);
+    });
+  }
+
+  /** Only a queue reservation with no existing worker may recover interrupted work.
+   * Recovery preserves every upload/rewrite checkpoint and never bypasses terminal retry policy.
+   */
+  recoverInterrupted(path: string): Promise<JobRecord> {
+    return this.mutate((draft) => {
+      const job = draft.jobs.find(
+        (candidate) => candidate.vaultPath === this.path(path),
+      );
+      if (
+        !job ||
+        ![
+          "waiting-stable",
+          "discovering-references",
+          "uploading",
+          "rewriting",
+          "verifying",
+        ].includes(job.state)
+      )
+        throw new Error("Only interrupted in-flight jobs can be recovered.");
+      const uncertain =
+        job.state === "uploading" ||
+        (!job.remoteUrl &&
+          (job.state === "rewriting" ||
+            job.state === "verifying" ||
+            job.rewrittenReferenceCount > 0 ||
+            job.rewrittenNotePaths.length > 0));
+      job.state = uncertain ? "uncertain" : "queued";
+      job.updatedAt = this.now();
+      if (uncertain)
+        job.failure = {
+          code: "interrupted-upload",
+          stage: "upload",
+          message:
+            "An interrupted upload requires acknowledgement before retrying.",
+          retry: "uncertain",
+        };
+      else delete job.failure;
+      this.logFailure(draft, job);
+      return job;
+    });
+  }
+
+  private logFailure(draft: JobSnapshot, job: JobRecord): void {
+    if (!job.failure || !exits.includes(job.state)) return;
+    draft.logs.push({
+      timestamp: job.updatedAt,
+      level:
+        job.state === "skipped"
+          ? "info"
+          : job.state === "cancelled"
+            ? "warn"
+            : "error",
+      stage: job.failure.stage,
+      code: job.failure.code,
+      message: job.failure.message,
+      vaultPath: job.vaultPath,
     });
   }
 

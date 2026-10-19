@@ -313,4 +313,55 @@ describe("attachment processing with real collaborators", () => {
     expect(f.writes).toEqual([]);
     expect(f.trash).toEqual([]);
   });
+  it("persists a redacted failure log after the terminal rewrite checkpoint", async () => {
+    const f = fixture();
+    f.failNote(f.note.path);
+    await f.run();
+    expect(f.store.snapshot().logs).toEqual([
+      {
+        timestamp: expect.any(Number),
+        level: "error",
+        stage: "rewrite",
+        code: "process-failed",
+        message: "Attachment conversion could not be completed safely.",
+        vaultPath: "attachments/image.png",
+      },
+    ]);
+    expect(f.checkpoints.at(-1)?.jobs[0]?.state).toBe("failed");
+    expect(JSON.stringify(f.store.snapshot().logs)).not.toMatch(
+      /private-secret|C:\\private/,
+    );
+  });
+  it("transient terminal-log persistence failure preserves a terminal job and cannot cause another upload or trash", async () => {
+    const f = fixture();
+    f.failNote(f.note.path);
+    f.failLogSave();
+    await expect(f.run()).resolves.toBeUndefined();
+    expect(f.job()).toMatchObject({
+      state: "failed",
+      failure: { stage: "rewrite" },
+      remoteUrl: "https://cdn.test/image.png",
+    });
+    expect(f.store.snapshot().logs).toHaveLength(1);
+    expect(
+      f.checkpoints
+        .filter((snapshot) => snapshot.jobs[0]?.state === "failed")
+        .every((snapshot) => snapshot.logs.length === 1),
+    ).toBe(true);
+    expect(f.uploads()).toBe(1);
+    expect(f.trash).toEqual([]);
+    expect(f.writes).toEqual([]);
+  });
+  it("terminal save failure after an uncertain upload cannot downgrade it to a safe retry", async () => {
+    const f = fixture();
+    f.setResponse({ ok: false, error: { kind: "timeout", dispatched: true } });
+    f.failSave("uncertain");
+    await f.run();
+    expect(f.job()).toMatchObject({
+      state: "uncertain",
+      failure: { retry: "uncertain", stage: "upload" },
+    });
+    expect(f.uploads()).toBe(1);
+    expect(f.trash).toEqual([]);
+  });
 });

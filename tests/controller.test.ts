@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AutoUploaderController } from "../src/obsidian/controller";
 import { fixture } from "./task5-fixture";
+import type { JobSnapshot } from "../src/job-store";
+import type { JobRecord, JobState } from "../src/domain";
 
 afterEach(() => vi.useRealTimers());
-function setup(enabled = true) {
-  const f = fixture();
+function setup(enabled = true, initial?: JobSnapshot) {
+  const f = fixture(initial);
   f.settings.enabled = enabled;
   const controller = new AutoUploaderController({
     settings: f.settings,
@@ -265,5 +267,200 @@ describe("controller lifecycle", () => {
     expect(f.job().state).toBe("trashed");
     expect(f.uploads()).toBe(2);
     await f.controller.stop();
+  });
+});
+
+describe("restart recovery and resilient shutdown", () => {
+  const interrupted = (
+    state: JobState,
+    patch: Partial<JobRecord> = {},
+  ): JobSnapshot => ({
+    jobs: [
+      {
+        vaultPath: "attachments/image.png",
+        state,
+        createdAt: 1,
+        updatedAt: 2,
+        fingerprint: { size: 0, mtime: 2 },
+        rewrittenNotePaths: [],
+        rewrittenReferenceCount: 0,
+        ...patch,
+      },
+    ],
+    logs: [],
+  });
+
+  it("hydrates and resumes rewriting while retaining exact prior progress and never reuploading", async () => {
+    const f = setup(
+      true,
+      interrupted("rewriting", {
+        remoteUrl: "https://cdn.test/image.png",
+        rewrittenNotePaths: ["earlier.md"],
+        rewrittenReferenceCount: 1,
+      }),
+    );
+    const earlier = f.add("earlier.md");
+    f.text.set(earlier, "![](<https://cdn.test/image.png>)");
+    await f.store.hydrate();
+    f.controller.start();
+    f.ready();
+    await f.controller.scanNow();
+    await f.queue.drain();
+    expect(f.job()).toMatchObject({
+      state: "trashed",
+      fingerprint: { size: 0, mtime: 2 },
+      remoteUrl: "https://cdn.test/image.png",
+      rewrittenNotePaths: ["earlier.md", "note.md"],
+      rewrittenReferenceCount: 2,
+    });
+    expect(f.uploads()).toBe(0);
+    expect(f.writes).toEqual(["note.md"]);
+    expect(f.trash).toEqual(["attachments/image.png"]);
+    await f.controller.stop();
+  });
+  it("resumes persisted verification with no remaining local references", async () => {
+    const f = setup(
+      true,
+      interrupted("verifying", {
+        remoteUrl: "https://cdn.test/image.png",
+        rewrittenNotePaths: ["note.md"],
+        rewrittenReferenceCount: 1,
+      }),
+    );
+    f.text.set(f.note, "![](<https://cdn.test/image.png>)");
+    f.caches.set(f.note, {});
+    await f.store.hydrate();
+    f.controller.start();
+    f.ready();
+    await f.controller.scanNow();
+    await f.queue.drain();
+    expect(f.job()).toMatchObject({
+      state: "trashed",
+      rewrittenReferenceCount: 1,
+    });
+    expect(f.uploads()).toBe(0);
+    expect(f.writes).toEqual([]);
+    await f.controller.stop();
+  });
+  it.each(["waiting-stable", "discovering-references"] as const)(
+    "safely restarts persisted %s through a new stability check",
+    async (state) => {
+      const f = setup(true, interrupted(state));
+      await f.store.hydrate();
+      f.source.stat.mtime = 5;
+      f.controller.start();
+      f.ready();
+      await f.controller.scanNow();
+      await f.queue.drain();
+      expect(f.job()).toMatchObject({
+        state: "trashed",
+        fingerprint: { size: 0, mtime: 5 },
+      });
+      expect(f.statReads()).toBeGreaterThanOrEqual(4);
+      expect(f.uploads()).toBe(1);
+      await f.controller.stop();
+    },
+  );
+  it.each([true, false])(
+    "classifies a persisted upload as uncertain even when source exists=%s",
+    async (exists) => {
+      const f = setup(true, interrupted("uploading"));
+      await f.store.hydrate();
+      if (!exists) f.files.splice(f.files.indexOf(f.source), 1);
+      f.controller.start();
+      f.ready();
+      await f.controller.scanNow();
+      await f.queue.drain();
+      expect(f.job()).toMatchObject({
+        state: "uncertain",
+        failure: { retry: "uncertain", stage: "upload" },
+      });
+      await f.controller.scanNow();
+      await f.controller.retrySafeFailures();
+      await f.queue.drain();
+      expect(f.uploads()).toBe(0);
+      expect(f.trash).toEqual([]);
+      await f.controller.stop();
+    },
+  );
+  it("does not reset an actively owned upload during reconciliation", async () => {
+    const f = setup();
+    f.blockUpload();
+    f.controller.start();
+    f.ready();
+    await f.controller.scanNow();
+    await vi.waitFor(() => expect(f.uploads()).toBe(1));
+    await f.controller.scanNow();
+    expect(f.job().state).toBe("uploading");
+    expect(f.uploads()).toBe(1);
+    await f.controller.stop();
+  });
+  it("classifies an interrupted upload even after its folder is removed from automatic policy", async () => {
+    const f = setup(true, interrupted("uploading"));
+    await f.store.hydrate();
+    f.settings.attachmentFolders = ["other"];
+    f.controller.start();
+    f.ready();
+    await f.controller.scanNow();
+    await f.queue.drain();
+    expect(f.job().state).toBe("uncertain");
+    expect(f.uploads()).toBe(0);
+    await f.controller.stop();
+  });
+  it("reconciliation retries a failed durable recovery without another upload", async () => {
+    vi.useFakeTimers();
+    const f = setup(
+      true,
+      interrupted("rewriting", { remoteUrl: "https://cdn.test/image.png" }),
+    );
+    await f.store.hydrate();
+    f.failSave("queued");
+    f.controller.start();
+    f.ready();
+    await f.controller.scanNow();
+    await f.queue.drain();
+    expect(f.job().state).toBe("rewriting");
+    expect(f.controller.snapshot().lastScan?.failed).toBe(1);
+    expect(f.uploads()).toBe(0);
+    await vi.advanceTimersByTimeAsync(100);
+    await f.queue.drain();
+    expect(f.job().state).toBe("trashed");
+    expect(f.uploads()).toBe(0);
+    await f.controller.stop();
+  });
+  it("drains active work after cancellation persistence rejects and resolves stop normally", async () => {
+    const f = setup(false);
+    f.add("attachments/second.png");
+    f.blockUpload();
+    f.holdUploadAbort();
+    f.controller.start();
+    await f.controller.scanNow();
+    await vi.waitFor(() => expect(f.uploads()).toBe(1));
+    f.failSave("uploading");
+    let outcome = "pending";
+    const stop = f.controller.stop().then(
+      () => {
+        outcome = "resolved";
+      },
+      () => {
+        outcome = "rejected";
+      },
+    );
+    try {
+      await vi.waitFor(() => expect(f.saveFailures()).toBe(1));
+      expect(f.uploadAborted()).toBe(true);
+      expect(outcome).toBe("pending");
+    } finally {
+      f.releaseUploadAbort();
+      await stop;
+      await f.queue.drain();
+    }
+    expect(outcome).toBe("resolved");
+    expect(f.controller.snapshot().state).toBe("stopped");
+    expect(f.store.snapshot().jobs.map((job) => job.state)).toEqual([
+      "uncertain",
+      "cancelled",
+    ]);
+    await new Promise<void>((resolve) => setImmediate(resolve));
   });
 });

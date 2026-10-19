@@ -106,14 +106,13 @@ export class AttachmentProcessor<T> {
       state: "failed" | "skipped" | "uncertain" | "cancelled" = "failed",
     ) => {
       if (!current() || isTerminalState(current()!.state)) return;
-      await store.transition(path, state, {
-        failure: {
-          code: /^[a-z][a-z0-9-]*$/.test(code) ? code : "operation-failed",
-          stage,
-          retry,
-          message: "Attachment conversion could not be completed safely.",
-        },
-      });
+      const failure: JobFailure = {
+        code: /^[a-z][a-z0-9-]*$/.test(code) ? code : "operation-failed",
+        stage,
+        retry,
+        message: "Attachment conversion could not be completed safely.",
+      };
+      await store.transition(path, state, { failure });
     };
     const cancelled = async () => {
       if (!signal.aborted) return false;
@@ -175,7 +174,8 @@ export class AttachmentProcessor<T> {
         uploadInFlight = true;
         const uploaded = await source.upload(file, client, signal);
         if (!uploaded.ok) {
-          uploadInFlight = false;
+          // Keep uncertainty until the terminal state (and its log) is durable.
+          uploadInFlight = uploaded.error.retry === "uncertain";
           return await fail(
             uploaded.error.code,
             uploaded.error.retry,

@@ -46,6 +46,11 @@ export class UploadQueue {
     return this.reserve(path);
   }
 
+  /** Reserve identity before recovery so a scan cannot reset an active worker. */
+  recover(path: string): Promise<EnqueueResult> {
+    return this.reserve(path, undefined, true);
+  }
+
   retry(
     path: string,
     options: { acknowledgeUncertain?: boolean } = {},
@@ -86,6 +91,7 @@ export class UploadQueue {
   private reserve(
     path: string,
     retry?: { acknowledgeUncertain?: boolean },
+    recover = false,
   ): Promise<EnqueueResult> {
     const normalized = normalizeVaultPath(path);
     if (!normalized)
@@ -121,7 +127,12 @@ export class UploadQueue {
     this.entries.set(normalized, entry);
     const initialize = async (): Promise<EnqueueResult> => {
       try {
-        if (retry) await this.store.transition(normalized, "queued", {}, retry);
+        if (recover && previous && previous.state !== "queued") {
+          const recovered = await this.store.recoverInterrupted(normalized);
+          if (isTerminalState(recovered.state))
+            return { ok: true, value: "duplicate" };
+        } else if (retry)
+          await this.store.transition(normalized, "queued", {}, retry);
         else if (!previous) {
           const now = this.now();
           await this.store.upsert({

@@ -12,7 +12,7 @@ import { ObsidianVaultAdapter } from "../src/obsidian/vault-adapter";
 import { AttachmentProcessor } from "../src/attachment-processor";
 import { UploadQueue } from "../src/upload-queue";
 
-export function fixture() {
+export function fixture(initial?: JobSnapshot) {
   const settings = sanitizeSettings({
     quietPeriodMs: 10,
     stabilitySampleIntervalMs: 1,
@@ -37,6 +37,10 @@ export function fixture() {
   let refresh = true;
   let pendingUpload = false;
   let uploadAborted = false;
+  let holdAbort = false;
+  let releaseAbort: (() => void) | undefined;
+  let saveFailures = 0;
+  let failLog = false;
   let statReads = 0;
   let statHook: (() => void) | undefined;
   let saveFailureState = "";
@@ -124,10 +128,15 @@ export function fixture() {
   const note = add("note.md", "![[attachments/image.png]]");
   const store = new JobStore({
     async load() {
-      return null;
+      return initial ? structuredClone(initial) : null;
     },
     async save(snapshot) {
+      if (failLog && snapshot.logs.length) {
+        failLog = false;
+        throw new Error("C:\\private\\log private-secret");
+      }
       if (snapshot.jobs[0]?.state === saveFailureState) {
+        saveFailures++;
         saveFailureState = "";
         throw new Error("C:\\private\\persistence private-secret");
       }
@@ -161,10 +170,13 @@ export function fixture() {
         return new Promise((resolve) => {
           const abort = () => {
             uploadAborted = true;
-            resolve({
-              ok: false,
-              error: { kind: "aborted", dispatched: true },
-            });
+            const finish = () =>
+              resolve({
+                ok: false,
+                error: { kind: "aborted", dispatched: true },
+              });
+            if (holdAbort) releaseAbort = finish;
+            else finish();
           };
           signal?.addEventListener("abort", abort, { once: true });
           if (signal?.aborted) abort();
@@ -244,6 +256,16 @@ export function fixture() {
       pendingUpload = true;
     },
     uploadAborted: () => uploadAborted,
+    holdUploadAbort: () => {
+      holdAbort = true;
+    },
+    releaseUploadAbort: () => {
+      releaseAbort?.();
+    },
+    saveFailures: () => saveFailures,
+    failLogSave: () => {
+      failLog = true;
+    },
     failSave: (state: string) => {
       saveFailureState = state;
     },
